@@ -45,14 +45,12 @@ AI-Excel-Agent 是一个面向 Windows 的本地 Excel / CSV 自动化工具。V
 1. 双击 `install.bat`。
 2. 脚本会创建 `.venv` 并安装项目及测试依赖。
 
-### PowerShell 手动安装
+### 命令行手动安装
 
-```powershell
+```bat
 cd D:\AI-Excel-Agent
 python -m venv .venv
-.\.venv\Scripts\Activate.ps1
-python -m pip install -U pip
-python -m pip install -e .[dev]
+".venv\Scripts\python.exe" -m pip install --disable-pip-version-check -e ".[dev]"
 ```
 
 ## 启动网页
@@ -65,9 +63,8 @@ start.bat
 
 或手动运行：
 
-```powershell
-.\.venv\Scripts\Activate.ps1
-streamlit run app.py --server.address 127.0.0.1 --server.port 8501
+```bat
+".venv\Scripts\python.exe" -m streamlit run app.py --server.address 127.0.0.1 --server.port 8501 --server.headless false
 ```
 
 浏览器打开：
@@ -136,17 +133,16 @@ outputs/
 
 `outputs/manifest.json` 保存任务历史。旧版平铺输出可运行以下脚本安全归档，脚本只移动、不删除：
 
-```powershell
-.\.venv\Scripts\python.exe scripts\archive_old_outputs.py
+```bat
+".venv\Scripts\python.exe" scripts\archive_old_outputs.py
 ```
 
 ## 测试与验收
 
-```powershell
-.\.venv\Scripts\Activate.ps1
-pytest -q
-python scripts\v1_smoke_test.py
-streamlit run app.py --server.address 127.0.0.1 --server.port 8501
+```bat
+".venv\Scripts\python.exe" -m pytest -q
+".venv\Scripts\python.exe" scripts\v1_smoke_test.py
+".venv\Scripts\python.exe" -m streamlit run app.py --server.address 127.0.0.1 --server.port 8501 --server.headless false
 ```
 
 Smoke Test 会：
@@ -184,12 +180,15 @@ python -m excel_agent.cli validate --input temp\sales_report.xlsx
 
 ## 安全说明
 
+- `start.bat` 不调用 PowerShell、不隐藏窗口、不下载远程脚本，只以前台方式启动本地 Python 和 Streamlit。
+- `install.bat` 只创建 `.venv` 并通过 pip 安装 `pyproject.toml` 中明文声明的依赖。
 - `.env` 已加入 `.gitignore`，不得提交。
 - `data/private/` 已加入 `.gitignore`，自定义接口密钥只保存在本机。
 - 上传文件复制到当前任务的 `input/`，原文件不会被覆盖。
 - 任务结果保存在本地 `outputs/tasks/`。
 - 默认不向外部模型发送完整工作簿、行数据或单元格内容。
 - 即使两个主观模型都认为通过，也只能表述为“未发现明显主观问题”，不能替代确定性校验和用户确认。
+- 详细说明见 `SECURITY.md`。如果安全软件仍然告警，请先核对告警路径并提交厂商误报复核，不建议关闭杀毒软件或粗暴添加整个目录白名单。
 
 ## 项目规则
 
