@@ -6,12 +6,13 @@ build-backend = "setuptools.build_meta"
 name = "ai-excel-agent"
 version = "0.1.0"
 description = "Local AI spreadsheet automation workbench for Excel and CSV tasks."
-requires-python = ">=3.10"
+requires-python = ">=3.11"
 dependencies = [
   "openpyxl>=3.1.2",
   "pandas>=2.0.0",
   "xlsxwriter>=3.1.0",
   "PyYAML>=6.0.0",
+  "streamlit>=1.40.0,<2.0.0",
 ]
 
 [project.optional-dependencies]
@@ -29,4 +30,3 @@ where = ["src"]
 [tool.pytest.ini_options]
 pythonpath = ["src"]
 testpaths = ["tests"]
-

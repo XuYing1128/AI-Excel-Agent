@@ -30,14 +30,22 @@ description: Use this skill whenever the user asks to create, edit, analyze, cle
 2. 判断表格类型：预算、报价、库存、销售、电商、项目、排班课程、考勤、财务模型、Dashboard 或通用表格。
 3. 检查输入：输入文件优先位于 `examples/input/` 或 `inputs/`；没有输入时使用合理样例并说明。
 4. 制定简短计划：列出 workbook、主要 sheet、公式区、图表和校验方式。
-5. 选择模板：优先使用 `templates/`；无合适模板时扩展模板或创建新模板。
-6. 处理数据：用 pandas 读取、清洗、合并、聚合、统计，保留中文列名。
-7. 生成表格：用 openpyxl / xlsxwriter 写入 sheet、公式、样式、筛选、冻结窗格、图表、数据验证和打印设置。
-8. 写公式：所有派生结果默认写 Excel 公式，不硬编码计算值。
-9. 保存文件：业务输出放入 `outputs/`；修改已有文件前复制到 `outputs/` 或 `backups/`。
-10. 校验文件：运行 `python -m excel_agent.cli validate --input <xlsx>` 或 `skills/xlsx_pro/scripts/validate_workbook.py`。
-11. 修复再验：若校验失败或发现错误，自动修复并再次校验。
-12. 交付说明：说明文件路径、sheet、关键公式、重算状态、校验结果和人工复核点。
+5. 网页任务必须先生成结构化 `TaskSpec`，用普通语言展示并等待用户确认；未确认不得生成。
+6. 选择模板：优先使用 `templates/`；无合适模板时扩展模板或创建新模板。
+7. 处理数据：用 pandas 读取、清洗、合并、聚合、统计，保留中文列名。
+8. 生成表格：用 openpyxl / xlsxwriter 写入 sheet、公式、样式、筛选、冻结窗格、图表、数据验证和打印设置。
+9. 写公式：所有派生结果默认写 Excel 公式，不硬编码计算值。
+10. 保存文件：网页任务输出到 `outputs/tasks/<task_id>/`；修改已有文件前复制到任务 `input/` 或 `backups/`。
+11. 校验文件：运行确定性校验器并保存 `reports/validation.json`。
+12. 修复再验：若校验失败或发现错误，自动修复并再次校验。
+13. 交付说明：说明文件路径、sheet、关键公式、重算状态、校验结果和人工复核点。
+
+## V1 模型边界
+
+- 模型只做意图理解、最多一轮澄清、结果解释和建议性审查。
+- 模型不能生成、修改或覆盖具体单元格，不能替代 pandas/openpyxl/xlsxwriter。
+- 客观正确性全部由确定性代码检查，不把完整敏感数据默认发送给外部模型。
+- 主观审查失败或未启用不影响下载；两个模型都 pass 也不能证明客观正确。
 
 ## 工具选择规则
 
@@ -141,4 +149,3 @@ description: Use this skill whenever the user asks to create, edit, analyze, cle
 8. “清洗这个考勤表，输出迟到、缺勤和出勤率统计。”
 9. “生成一个简单利润测算模型，按月份计算收入、成本、净利润、毛利率和 ROI。”
 10. “做一个综合 Dashboard，数据源和展示页分离，包含 KPI、Top N、趋势和分类占比。”
-
