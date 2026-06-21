@@ -1,0 +1,5 @@
+type: quotation
+title: 产品报价单
+default_sheets: [Instructions, Data, Summary]
+formula_columns: [未税金额, 税额, 含税总价]
+validation_points: [数据行数]

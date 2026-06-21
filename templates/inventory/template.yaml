@@ -1,0 +1,5 @@
+type: inventory
+title: 小店库存进销存表
+default_sheets: [Instructions, Data, Summary]
+formula_columns: [期末库存, 库存预警, 库存周转率]
+validation_points: [数据行数, 库存预警]

@@ -1,0 +1,5 @@
+type: project_plan
+title: 项目计划表
+default_sheets: [Instructions, Data, Summary]
+formula_columns: [工期天数, 状态, 延期标记]
+validation_points: [数据行数, 延期任务]

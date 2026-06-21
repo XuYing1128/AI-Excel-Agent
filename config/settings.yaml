@@ -1,0 +1,12 @@
+project_name: AI-Excel-Agent
+default_output_dir: outputs
+default_formula_rows: 30
+backup_suffix: ".bak"
+validation:
+  require_instruction_sheet: true
+  max_reasonable_column_width: 60
+  fail_on_excel_error_values: true
+recalc:
+  prefer_libreoffice: true
+  allow_excel_com_on_windows: true
+

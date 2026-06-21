@@ -1,0 +1,5 @@
+type: sales_report
+title: 销售月报模板
+default_sheets: [Instructions, Data, Summary]
+formula_columns: [销售额, 毛利, 毛利率]
+validation_points: [数据行数]

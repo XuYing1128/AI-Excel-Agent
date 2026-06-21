@@ -1,0 +1,17 @@
+default:
+  font_name: Microsoft YaHei
+  title_fill: "1F4E78"
+  header_fill: "D9EAF7"
+  input_fill: "FFF2CC"
+  calc_fill: "E2F0D9"
+  summary_fill: "EADCF8"
+  border_color: "B7B7B7"
+  title_font_color: "FFFFFF"
+  header_font_color: "1F1F1F"
+  negative_font_color: "C00000"
+number_formats:
+  money: '#,##0.00;[Red]-#,##0.00'
+  percent: '0.00%'
+  date: 'yyyy-mm-dd'
+  integer: '0'
+

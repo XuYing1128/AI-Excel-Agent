@@ -1,0 +1,40 @@
+types:
+  personal_budget:
+    aliases: [budget, personal, household, 预算, 收支, 家庭预算, 个人预算]
+    description: 个人/家庭收支预算
+  family_budget:
+    aliases: [family_budget, family, annual_budget, 家庭年度预算, 年度预算, 家庭预算]
+    description: 家庭年度预算表
+  quotation:
+    aliases: [quote, quotation, po, 报价, 报价单, 采购报价, 采购单]
+    description: 报价单/采购报价
+  invoice_draft:
+    aliases: [invoice_draft, invoice, receivable, 发票草稿, 收款明细, 开票]
+    description: 发票草稿/收款明细
+  inventory:
+    aliases: [inventory, stock, sku, 库存, 进销存, 入库, 出库]
+    description: 库存/进销存
+  sales_report:
+    aliases: [sales, sales_report, 销售, 销售日报, 销售月报]
+    description: 销售日报/月报
+  ecommerce_analysis:
+    aliases: [ecommerce, e-commerce, order, gmv, 电商, 订单, 店铺, SKU]
+    description: 电商 SKU/订单/GMV 分析
+  project_plan:
+    aliases: [project, gantt, 项目, 项目计划, 甘特]
+    description: 项目计划/Gantt 风格表
+  schedule:
+    aliases: [schedule, timetable, shift, 课程表, 排班, 值班]
+    description: 课程表/排班表
+  attendance:
+    aliases: [attendance, checkin, 考勤, 签到, 出勤]
+    description: 考勤/签到统计
+  finance_model:
+    aliases: [finance, model, profit, pnl, 财务, 利润, 测算, 收入成本]
+    description: 收入成本利润测算/简单财务模型
+  dashboard:
+    aliases: [dashboard, bi, 仪表盘, 看板, 经营分析]
+    description: 综合仪表盘
+  generic_table:
+    aliases: [generic, table, 通用, 表格]
+    description: 通用表格

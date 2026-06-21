@@ -1,0 +1,5 @@
+type: dashboard
+title: 综合经营 Dashboard
+default_sheets: [Instructions, Data, Summary, Dashboard]
+formula_columns: [毛利, 毛利率, 客单价, KPI]
+validation_points: [数据行数, Dashboard 数据源分离]

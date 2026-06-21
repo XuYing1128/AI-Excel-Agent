@@ -1,0 +1,5 @@
+type: personal_budget
+title: 个人月度收支预算表
+default_sheets: [Instructions, Data, Summary]
+formula_columns: [差异, 执行率]
+validation_points: [数据行数]

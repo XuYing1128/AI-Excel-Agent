@@ -1,0 +1,5 @@
+type: finance_model
+title: 简单收入成本利润测算模型
+default_sheets: [Instructions, Data, Summary]
+formula_columns: [毛利, 净利润, 毛利率, 净利率, ROI, 收入增长率]
+validation_points: [数据行数]

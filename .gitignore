@@ -1,0 +1,38 @@
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.venv/
+venv/
+env/
+.env
+build/
+dist/
+*.egg-info/
+.DS_Store
+Thumbs.db
+
+# Local inputs, temporary files, and backups may contain sensitive data.
+inputs/
+temp/
+backups/
+
+# Generated task artifacts stay local. Keep the directory structure in Git.
+outputs/tasks/*
+!outputs/tasks/.gitkeep
+outputs/legacy/*
+!outputs/legacy/.gitkeep
+outputs/manifest.json
+
+# Legacy root-level outputs are ignored until archived by the V1 helper.
+outputs/*.xlsx
+outputs/*.xlsm
+outputs/*.json
+outputs/*.md
+!outputs/.gitkeep
+
+# Temporary Office lock files.
+~$*.xlsx
+~$*.xlsm
+~$*.docx
