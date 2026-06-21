@@ -33,7 +33,7 @@ TYPE_LABELS = {
     "schedule": "课程/排班表",
     "attendance": "考勤统计",
     "finance_model": "财务测算",
-    "dashboard": "综合 Dashboard",
+    "dashboard": "综合仪表盘",
     "generic_table": "通用表格",
 }
 
@@ -46,9 +46,9 @@ def build_task_spec_draft(user_prompt: str, input_files: list[str]) -> TaskSpecD
     assumptions = _default_assumptions(classification.table_type, prompt, files)
     task_spec = TaskSpec(
         task_type=classification.table_type,
-        user_goal=prompt or "根据上传文件生成合适的本地 Excel 表格",
+        user_goal=prompt or "根据上传文件生成合适的本地电子表格",
         input_files=files,
-        output_name="result.xlsx",
+        output_name="生成结果.xlsx",
         preserve_template_style=bool(
             files
             and any(Path(path).suffix.lower() in {".xlsx", ".xlsm"} for path in files)
@@ -130,7 +130,7 @@ def merge_user_answers_into_task_spec(task_spec: TaskSpec, answers: dict[str, An
 
     data_mode = str(clean_answers.get("data_mode", "")).strip()
     if data_mode == "template" and not merged.input_files:
-        _append_unique(merged.assumptions, "未提供原始数据，当前 V1 将生成标准模板/demo。")
+        _append_unique(merged.assumptions, "未提供原始数据，当前版本将生成标准模板示例。")
     elif data_mode == "upload" and not merged.input_files:
         _append_unique(merged.assumptions, "用户计划使用原始数据，但确认时尚未提供可用文件。")
 
@@ -193,10 +193,10 @@ def _default_assumptions(task_type: str, prompt: str, input_files: list[str]) ->
         "生成后必须运行确定性校验器；主观模型审查不会替代客观校验。",
     ]
     if not input_files:
-        assumptions.append("当前没有输入文件，将使用标准模板中的示例数据生成 demo。")
+        assumptions.append("当前没有输入文件，将使用标准模板中的示例数据生成示例表格。")
     if task_type != "sales_report":
         assumptions.append(
-            "当前 V1 对该类型主要生成标准模板，不保证自动完成复杂真实数据分析。"
+            "当前版本对该类型主要生成标准模板，不保证自动完成复杂真实数据分析。"
         )
     if task_type in {"quotation", "invoice_draft", "finance_model", "attendance"}:
         assumptions.append("该任务包含高风险业务结果，必须由人工复核。")

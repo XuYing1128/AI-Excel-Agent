@@ -1,10 +1,11 @@
 @echo off
 setlocal
+chcp 65001 >nul
 cd /d %~dp0
 
 where python >nul 2>nul
 if errorlevel 1 (
-  echo [ERROR] Python was not found. Install Python 3.11 or newer first.
+  echo [错误] 未找到 Python，请先安装 Python 3.11 或更高版本。
   pause
   exit /b 1
 )
@@ -21,12 +22,12 @@ python -m pip install -e .[dev]
 if errorlevel 1 goto :failed
 
 echo.
-echo Installation completed. Double-click start.bat to open the local web tool.
+echo 安装完成。以后双击 start.bat 即可打开本地表格助手。
 pause
 exit /b 0
 
 :failed
 echo.
-echo [ERROR] Installation failed. Review the messages above.
+echo [错误] 安装失败，请查看上方提示。
 pause
 exit /b 1

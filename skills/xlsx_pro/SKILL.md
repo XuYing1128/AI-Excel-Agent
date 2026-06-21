@@ -46,6 +46,8 @@ description: Use this skill whenever the user asks to create, edit, analyze, cle
 - 模型不能生成、修改或覆盖具体单元格，不能替代 pandas/openpyxl/xlsxwriter。
 - 客观正确性全部由确定性代码检查，不把完整敏感数据默认发送给外部模型。
 - 主观审查失败或未启用不影响下载；两个模型都 pass 也不能证明客观正确。
+- 自定义 API 只能辅助理解需求和生成主观建议，不能读取完整工作簿数据，不能修改单元格。
+- API 连接失败时回退到本地规则和确定性校验，不能阻塞表格生成与下载。
 
 ## 工具选择规则
 

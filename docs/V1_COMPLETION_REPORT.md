@@ -5,6 +5,8 @@
 ## 完成概览
 
 - 建立 Windows 本地 Streamlit 单页工具，默认监听 `127.0.0.1:8501`。
+- 页面已改为中文简洁界面，无登录入口，并隐藏部署按钮和开发者菜单。
+- 支持在页面内配置兼容对话补全格式的自定义模型接口。
 - 接入现有分类器、模板生成器、销售分析器和确定性校验器。
 - 实现结构化 TaskSpec、最多一轮澄清、用户确认后生成。
 - 实现独立任务目录、运行日志、校验报告、主观审查占位报告和 manifest。
@@ -28,7 +30,7 @@
 
 ```text
 python -m pytest -q
-16 passed
+23 passed
 ```
 
 覆盖：
@@ -42,6 +44,8 @@ python -m pytest -q
 - 旧输出安全归档。
 - Streamlit 初始页面加载。
 - Streamlit “分析需求 → 确认并生成 → 生成 Excel/校验/manifest”主流程。
+- 本机接口设置保存、连接封装、模型需求理解回退和建议审查。
+- 开发工具栏、错误详情、顶部工具区和统计上报关闭配置。
 
 ### Smoke Test
 
@@ -89,7 +93,7 @@ streamlit run app.py --server.address 127.0.0.1 --server.port 8501
 ## 已知限制
 
 - 除 `sales_report` 外，其他类型 V1 主要生成标准模板/demo。
-- 主观 DeepSeek/豆包审查没有启用，也没有发送任何工作簿数据。
+- 自定义模型接口默认不启用；启用后仍不会发送完整工作簿数据或允许模型修改单元格。
 - 不做真实 Excel 引擎重算；公式由 Excel 打开后自行计算。
 - 不做复杂模板样式迁移；`preserve_template_style` 仅在现有内核能力范围内处理并明确提示。
 - 可选偏好记忆没有接入主流程。
@@ -100,4 +104,4 @@ streamlit run app.py --server.address 127.0.0.1 --server.port 8501
 1. 在真实 Windows 用户环境双击验证 `install.bat` 和 `start.bat`。
 2. 根据实际用户反馈补充上传文件字段映射提示。
 3. 如确有需求，再逐类实现 inventory、attendance、project_plan 和 ecommerce 的真实数据分析器。
-4. 主观模型审查应保持可选，并在正式启用前增加明确的数据发送确认。
+4. 如果后续增加更多接口协议，应继续保持本地保存、最小数据发送和失败不阻塞下载。

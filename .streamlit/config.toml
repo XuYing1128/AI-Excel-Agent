@@ -1,6 +1,21 @@
 [browser]
 gatherUsageStats = false
 
+[client]
+toolbarMode = "minimal"
+showErrorDetails = "none"
+
 [server]
 address = "127.0.0.1"
 port = 8501
+headless = true
+
+[ui]
+hideTopBar = true
+
+[theme]
+primaryColor = "#2563EB"
+backgroundColor = "#F5F7FB"
+secondaryBackgroundColor = "#FFFFFF"
+textColor = "#172033"
+font = "sans serif"

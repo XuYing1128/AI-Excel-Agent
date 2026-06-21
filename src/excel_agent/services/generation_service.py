@@ -57,10 +57,10 @@ def generate_from_task_spec(task_spec: TaskSpec, task_paths: TaskPaths) -> Gener
             create_workbook(task_spec.task_type, task_paths.output_file)
             if task_spec.task_type != "sales_report":
                 notices.append(
-                    "当前 V1 对该类型主要生成标准模板，不保证自动完成复杂真实数据分析。"
+                    "当前版本对该类型主要生成标准模板，不保证自动完成复杂真实数据分析。"
                 )
             elif task_spec.task_type == "sales_report":
-                notices.append("未提供销售输入文件，已生成销售报表标准模板/demo。")
+                notices.append("未提供销售输入文件，已生成销售报表标准模板示例。")
 
         notices.extend(_apply_task_options(task_paths.output_file, task_spec))
         if not task_paths.output_file.exists():
@@ -69,7 +69,7 @@ def generate_from_task_spec(task_spec: TaskSpec, task_paths: TaskPaths) -> Gener
         result = GenerationResult(
             success=True,
             output_file=str(task_paths.output_file),
-            message="Excel 已由确定性 Python 内核生成。",
+            message="电子表格已由本地确定性程序生成。",
             error=None,
             used_command=used_command,
             mode=mode,
@@ -86,7 +86,7 @@ def generate_from_task_spec(task_spec: TaskSpec, task_paths: TaskPaths) -> Gener
         result = GenerationResult(
             success=False,
             output_file=str(task_paths.output_file) if task_paths.output_file.exists() else None,
-            message="Excel 生成失败。",
+            message="电子表格生成失败。",
             error=f"{type(exc).__name__}: {exc}",
             used_command=None,
             mode="error",
@@ -116,7 +116,7 @@ def _apply_task_options(output_file: Path, task_spec: TaskSpec) -> list[str]:
 
     if not task_spec.include_summary and "Summary" in wb.sheetnames:
         if task_spec.task_type == "dashboard":
-            notices.append("Dashboard 依赖 Summary，已为避免公式失效保留汇总页。")
+            notices.append("综合仪表盘依赖汇总页，已为避免公式失效保留汇总页。")
         else:
             wb.remove(wb["Summary"])
             changed = True
@@ -128,7 +128,7 @@ def _apply_task_options(output_file: Path, task_spec: TaskSpec) -> list[str]:
 
     if task_spec.preserve_template_style and task_spec.input_files:
         notices.append(
-            "当前 V1 仅在现有内核支持时保留模板结构；标准模板生成不会复制任意上传工作簿的全部样式。"
+            "当前版本仅在现有内核支持时保留模板结构；标准模板生成不会复制任意上传工作簿的全部样式。"
         )
 
     if changed:

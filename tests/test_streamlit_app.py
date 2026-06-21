@@ -2,13 +2,16 @@ from pathlib import Path
 
 from streamlit.testing.v1 import AppTest
 
+from excel_agent.api_settings import load_api_settings
+
 
 def test_streamlit_app_initial_page_loads():
     app_path = Path(__file__).resolve().parents[1] / "app.py"
     app = AppTest.from_file(str(app_path), default_timeout=15).run()
     assert not app.exception
-    assert any("AI-Excel-Agent 本地表格生成工具" in item.value for item in app.title)
+    assert any("本地表格助手" in item.value for item in app.markdown)
     assert any(button.label == "分析需求" for button in app.button)
+    assert any(expander.label == "接口设置" for expander in app.expander)
 
 
 def test_streamlit_confirmed_task_generates_and_validates(tmp_path, monkeypatch):
@@ -31,3 +34,25 @@ def test_streamlit_confirmed_task_generates_and_validates(tmp_path, monkeypatch)
     assert len(task_outputs) == 1
     assert len(validation_reports) == 1
     assert (tmp_path / "outputs" / "manifest.json").exists()
+
+
+def test_streamlit_can_save_local_custom_api_settings(tmp_path, monkeypatch):
+    settings_path = tmp_path / "private" / "api_settings.json"
+    monkeypatch.setenv("AI_EXCEL_API_SETTINGS_FILE", str(settings_path))
+    app_path = Path(__file__).resolve().parents[1] / "app.py"
+    app = AppTest.from_file(str(app_path), default_timeout=20).run()
+
+    next(item for item in app.text_input if item.label == "接口名称").input("测试模型")
+    next(item for item in app.text_input if item.label == "接口地址").input(
+        "https://example.com/v1"
+    )
+    next(item for item in app.text_input if item.label == "模型名称").input("model")
+    next(item for item in app.text_input if item.label == "接口密钥").input("secret")
+    next(item for item in app.checkbox if item.label == "启用自定义接口").check()
+    next(button for button in app.button if button.label == "保存设置").click()
+    app.run()
+
+    assert not app.exception
+    saved = load_api_settings(settings_path)
+    assert saved.configured is True
+    assert saved.provider_name == "测试模型"
