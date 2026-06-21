@@ -1,6 +1,10 @@
 from datetime import datetime
 
-from excel_agent.task_paths import create_task_paths, save_uploaded_bytes
+from excel_agent.task_paths import (
+    create_task_paths,
+    existing_task_paths,
+    save_uploaded_bytes,
+)
 
 
 def test_create_unique_task_paths(tmp_path):
@@ -18,3 +22,20 @@ def test_create_unique_task_paths(tmp_path):
     uploaded = save_uploaded_bytes("orders.csv", b"a,b\n1,2\n", first)
     assert uploaded.exists()
     assert uploaded.parent == first.input_dir.resolve()
+
+
+def test_task_paths_can_use_content_based_output_name(tmp_path):
+    paths = create_task_paths(
+        "generic_table",
+        tmp_path,
+        datetime(2026, 6, 21, 15, 30, 12),
+        output_name="天气概况.xlsx",
+    )
+    assert paths.output_file.name == "天气概况.xlsx"
+    paths.output_file.write_bytes(b"test")
+    loaded = existing_task_paths(
+        paths.task_id,
+        paths.output_file,
+        base_dir=tmp_path,
+    )
+    assert loaded.output_file == paths.output_file

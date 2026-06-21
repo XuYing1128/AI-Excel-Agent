@@ -6,6 +6,7 @@ import json
 from dataclasses import dataclass
 
 from ..api_settings import ApiSettings
+from ..content_plan import merge_model_content_plan, suggest_output_name
 from ..intent_classifier import SUPPORTED_TYPES
 from ..task_spec import TaskSpecDraft
 from .custom_api_service import chat_completion, parse_json_object
@@ -33,21 +34,28 @@ def enhance_task_spec_draft(
         "用户需求": user_prompt,
         "输入文件名": input_file_names,
         "本地规则初判": draft.task_spec.task_type,
+        "本地提取方案": draft.task_spec.options.get("content_plan", {}),
         "允许类型": SUPPORTED_TYPES,
     }
     result = chat_completion(
         settings,
         system_prompt=(
-            "你是本地表格工具的需求分析助手。你不能读取文件内容、不能设计具体单元格、"
-            "不能生成公式或代码。只根据用户文字和文件名判断需求。"
+            "你是本地表格工具的需求分析助手。你不能读取文件内容、不能指定单元格地址、"
+            "不能输出 Excel 公式或代码。你可以把用户明确要求的标题、列名和计算语义整理成结构化方案。"
             "只返回一个 JSON 对象，不要 Markdown。字段必须是："
             "task_type、confidence、goal_summary、clarifying_questions、"
-            "include_charts、include_summary。"
+            "include_charts、include_summary、content_plan。"
+            "content_plan 字段为对象，可包含 title、layout、columns、formula_rules、summary_rules。"
+            "columns 每项只能包含 name、kind、role；kind 只能是 text/number/money/percentage/date/time，"
+            "role 只能是 input/formula。formula_rules 只能使用 average、difference、product、ratio、"
+            "sum、weather_advice 等计算语义，不得返回公式字符串。summary_rules 只能使用 "
+            "averageif、sumif、countif、average、sum、count。"
+            "不要增加用户没有要求的图表、汇总页或字段。"
             f"task_type 只能是：{allowed}。clarifying_questions 最多 5 个中文问题。"
         ),
         user_prompt=json.dumps(request, ensure_ascii=False),
         temperature=0.1,
-        max_tokens=600,
+        max_tokens=1800,
     )
     if not result.success:
         return ApiPlanningResult(
@@ -81,12 +89,46 @@ def _merge_payload(draft: TaskSpecDraft, payload: dict) -> None:
     if summary:
         draft.task_spec.options["model_goal_summary"] = summary
     if isinstance(payload.get("include_charts"), bool):
-        draft.task_spec.include_charts = payload["include_charts"]
+        if payload["include_charts"] is False:
+            draft.task_spec.include_charts = False
+        elif draft.task_spec.options.get("chart_requested_explicitly"):
+            draft.task_spec.include_charts = True
     if isinstance(payload.get("include_summary"), bool):
-        draft.task_spec.include_summary = payload["include_summary"]
+        if payload["include_summary"] is False:
+            draft.task_spec.include_summary = False
+        elif draft.task_spec.options.get("summary_sheet_requested_explicitly"):
+            draft.task_spec.include_summary = True
+
+    content_plan = payload.get("content_plan")
+    if isinstance(content_plan, dict):
+        local_plan = draft.task_spec.options.get("content_plan", {})
+        may_use_custom_structure = bool(local_plan.get("explicit_structure")) or (
+            draft.task_spec.task_type == "generic_table"
+            and isinstance(content_plan.get("columns"), list)
+        )
+        if may_use_custom_structure:
+            merged_plan = merge_model_content_plan(local_plan, content_plan)
+            draft.task_spec.options["content_plan"] = merged_plan
+            if merged_plan.get("explicit_structure"):
+                draft.task_spec.options["generation_policy"] = "custom_content"
+                draft.task_spec.output_name = suggest_output_name(
+                    draft.task_spec.user_goal,
+                    draft.task_spec.task_type,
+                    merged_plan.get("title"),
+                )
+                if merged_plan.get("layout") == "single_sheet":
+                    draft.task_spec.include_instructions_sheet = False
+        else:
+            model_title = str(content_plan.get("title", "")).strip()
+            if model_title:
+                draft.task_spec.output_name = suggest_output_name(
+                    draft.task_spec.user_goal,
+                    draft.task_spec.task_type,
+                    model_title,
+                )
 
     questions = payload.get("clarifying_questions", [])
-    if isinstance(questions, list):
+    if isinstance(questions, list) and draft.clarifying_questions:
         model_questions = [str(item).strip() for item in questions if str(item).strip()]
         combined = list(dict.fromkeys([*draft.clarifying_questions, *model_questions]))
         draft.clarifying_questions = combined[:5]

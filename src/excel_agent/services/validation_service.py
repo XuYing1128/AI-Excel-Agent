@@ -7,6 +7,8 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any
 
+from openpyxl import load_workbook
+
 from ..task_paths import TaskPaths, append_run_log_event
 from ..task_spec import TaskSpec
 from ..validators import validate_workbook
@@ -38,6 +40,20 @@ def validate_generated_workbook(
     )
     try:
         report = validate_workbook(output_file, task_paths.validation_report)
+        _apply_task_fidelity_checks(report, output_file, task_spec)
+        report["summary"]["error_count"] = len(report.get("errors", []))
+        report["summary"]["warning_count"] = len(report.get("warnings", []))
+        report["status"] = (
+            "fail"
+            if report["errors"]
+            else "warn"
+            if report["warnings"]
+            else "pass"
+        )
+        task_paths.validation_report.write_text(
+            json.dumps(report, ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
         result = ValidationResult(
             status=str(report.get("status", "error")),
             issues=list(report.get("errors", [])),
@@ -90,3 +106,102 @@ def validate_generated_workbook(
             details=result.to_dict(),
         )
         return result
+
+
+def _apply_task_fidelity_checks(
+    report: dict[str, Any],
+    output_file: str | Path,
+    task_spec: TaskSpec,
+) -> None:
+    plan = task_spec.options.get("content_plan", {})
+    if not isinstance(plan, dict) or not plan.get("explicit_structure"):
+        return
+    try:
+        wb = load_workbook(output_file, data_only=False)
+    except Exception:
+        return
+    expected_columns = [
+        str(item.get("name", "")).strip()
+        for item in plan.get("columns", [])
+        if str(item.get("name", "")).strip()
+    ]
+    expected_title = str(plan.get("title", "")).strip()
+    target = None
+    detected_headers: list[str] = []
+    header_row = None
+    for ws in wb.worksheets:
+        for row in range(1, min(ws.max_row, 12) + 1):
+            values = [
+                str(ws.cell(row, column).value).strip()
+                for column in range(1, ws.max_column + 1)
+                if ws.cell(row, column).value not in (None, "")
+            ]
+            if expected_columns and len(set(values) & set(expected_columns)) >= max(
+                1, min(2, len(expected_columns))
+            ):
+                target = ws
+                detected_headers = values
+                header_row = row
+                break
+        if target is not None:
+            break
+
+    if target is None:
+        _fidelity_error(
+            report,
+            "requirement_columns",
+            "生成结果中没有找到用户要求的表头。",
+        )
+        return
+
+    missing = [name for name in expected_columns if name not in detected_headers]
+    if missing:
+        _fidelity_error(
+            report,
+            "requirement_columns",
+            f"生成结果缺少用户要求的列：{'、'.join(missing)}。",
+        )
+
+    if expected_title:
+        visible_titles = [
+            str(ws["A1"].value or "").strip() for ws in wb.worksheets if ws.sheet_state == "visible"
+        ]
+        if not any(expected_title in value or value in expected_title for value in visible_titles if value):
+            _fidelity_warning(
+                report,
+                "requirement_title",
+                f"工作簿标题与需求标题“{expected_title}”不一致。",
+            )
+
+    expected_rows = int(plan.get("expected_data_rows") or 0)
+    if expected_rows and header_row:
+        actual_rows = sum(
+            1
+            for row in range(header_row + 1, target.max_row + 1)
+            if any(target.cell(row, col).value not in (None, "") for col in range(1, target.max_column + 1))
+        )
+        if actual_rows < expected_rows:
+            _fidelity_error(
+                report,
+                "requirement_rows",
+                f"需求中识别到 {expected_rows} 条数据，但表格只有 {actual_rows} 条。",
+            )
+
+    if task_spec.include_charts and sum(len(ws._charts) for ws in wb.worksheets) == 0:
+        _fidelity_warning(report, "requirement_chart", "用户要求图表，但工作簿中未找到图表。")
+
+    report["summary"]["requirement_fidelity_checked"] = True
+    report["summary"]["expected_column_count"] = len(expected_columns)
+
+
+def _fidelity_error(report: dict[str, Any], check: str, message: str) -> None:
+    report["errors"].append({"check": check, "message": message})
+    report["status"] = "fail"
+    if "请根据检查结果修改后重新生成。" not in report["suggestions"]:
+        report["suggestions"].append("请根据检查结果修改后重新生成。")
+
+
+def _fidelity_warning(report: dict[str, Any], check: str, message: str) -> None:
+    report["warnings"].append({"check": check, "message": message})
+    if report.get("status") == "pass":
+        report["status"] = "warn"

@@ -1,18 +1,24 @@
-# AI-Excel-Agent V1 完成报告
+# AI-Excel-Agent 当前完成报告
 
 检查日期：2026-06-21
 
 ## 完成概览
 
-- 建立 Windows 本地 Streamlit 单页工具，默认监听 `127.0.0.1:8501`。
-- 页面已改为中文简洁界面，无登录入口，并隐藏部署按钮和开发者菜单。
-- 支持在页面内配置兼容对话补全格式的自定义模型接口。
+- 建立 Windows 本地 Streamlit 工具，默认监听 `127.0.0.1:8501`。
+- 页面使用中文简洁界面，并隐藏部署按钮和开发者菜单。
+- 自定义模型接口已移动到独立设置页，只有显式保存后才生效。
 - 启动脚本已改为纯 `cmd + 本地 Python` 前台启动，不再调用隐藏 PowerShell。
 - 接入现有分类器、模板生成器、销售分析器和确定性校验器。
 - 实现结构化 TaskSpec、最多一轮澄清、用户确认后生成。
+- 实现用户明确标题、列、内嵌数据和计算语义的内容驱动生成，不再强制套通用模板。
+- 上传非销售数据时按实际字段生成原始数据、清洗数据、汇总和清洗报告。
+- 增加需求一致性检查，核对标题、要求列、数据条数、公式列和图表要求。
+- 增加表格、方案、检查报告和审查建议的页面内预览。
+- 审查建议可直接带入下一次修改；每次修改生成新版本，不覆盖旧版。
+- 增加“最近文件”，关闭页面后仍可重新打开历史任务并继续修改。
+- 输出文件名根据内容生成或由用户输入。
 - 实现独立任务目录、运行日志、校验报告、主观审查占位报告和 manifest。
 - 实现 Excel、validation.json、task_spec.json、subjective_review.json 下载。
-- 实现最近 10 个任务历史。
 - 增加 `install.bat`、`start.bat`、旧输出归档脚本和 V1 Smoke Test。
 - 初始化 Git 基线，`.env` 已排除。
 - 原有 49 个根目录输出已安全移动到 `outputs/legacy/`，没有删除。
@@ -31,7 +37,7 @@
 
 ```text
 python -m pytest -q
-23 passed
+33 passed
 ```
 
 覆盖：
@@ -59,7 +65,7 @@ python scripts\v1_smoke_test.py
 - 成功生成销售月报。
 - 调用现有 `analyze_sales_file`。
 - 校验状态 `pass`。
-- 产生 `task_spec.json`、`run_log.json`、`output/result.xlsx`、
+- 产生 `task_spec.json`、`run_log.json`、内容命名的 `.xlsx`、
   `reports/validation.json` 和 `reports/subjective_review.json`。
 - 成功写入 `outputs/manifest.json`。
 
@@ -83,8 +89,13 @@ streamlit run app.py --server.address 127.0.0.1 --server.port 8501
 | TaskSpec 确认门禁 | 完成 |
 | 调用现有内核生成 | 完成 |
 | 销售输入真实分析 | 完成 |
-| 其他类型标准模板/demo | 完成并明确提示边界 |
+| 明确列和内嵌数据的自定义生成 | 完成 |
+| 上传文件按真实字段生成 | 完成 |
 | 确定性校验 | 完成 |
+| 需求一致性检查 | 完成 |
+| 页面内表格和报告预览 | 完成 |
+| 审查建议带入修改 | 完成 |
+| 历史任务重新打开 | 完成 |
 | Excel 和 JSON 下载 | 完成 |
 | 主观审查非阻塞占位 | 完成 |
 | task_id 和独立任务目录 | 完成 |
@@ -93,7 +104,6 @@ streamlit run app.py --server.address 127.0.0.1 --server.port 8501
 
 ## 已知限制
 
-- 除 `sales_report` 外，其他类型 V1 主要生成标准模板/demo。
 - 自定义模型接口默认不启用；启用后仍不会发送完整工作簿数据或允许模型修改单元格。
 - 不做真实 Excel 引擎重算；公式由 Excel 打开后自行计算。
 - 不做复杂模板样式迁移；`preserve_template_style` 仅在现有内核能力范围内处理并明确提示。
@@ -103,6 +113,6 @@ streamlit run app.py --server.address 127.0.0.1 --server.port 8501
 ## 后续修补建议
 
 1. 在真实 Windows 用户环境双击验证 `install.bat` 和 `start.bat`。
-2. 根据实际用户反馈补充上传文件字段映射提示。
-3. 如确有需求，再逐类实现 inventory、attendance、project_plan 和 ecommerce 的真实数据分析器。
+2. 根据实际用户反馈继续补充更多语义公式和字段映射。
+3. 逐类增强 inventory、attendance、project_plan 和 ecommerce 的专用真实数据分析。
 4. 如果后续增加更多接口协议，应继续保持本地保存、最小数据发送和失败不阻塞下载。

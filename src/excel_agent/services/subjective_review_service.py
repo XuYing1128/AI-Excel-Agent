@@ -122,6 +122,7 @@ def run_subjective_review(
             "sheet_count": workbook_summary.get("sheet_count"),
             "generation_mode": generation_summary.get("mode"),
         },
+        "revision_prompt": _revision_prompt_from_review(review),
     }
     _save_result(result, task_paths)
     append_run_log_event(
@@ -201,6 +202,10 @@ def _compact_workbook_summary(summary: dict[str, Any]) -> dict[str, Any]:
                     "max_row": item.get("max_row"),
                     "max_column": item.get("max_column"),
                     "hidden": item.get("hidden"),
+                    "title": item.get("title"),
+                    "headers": item.get("headers", []),
+                    "formula_columns": item.get("formula_columns", []),
+                    "chart_count": item.get("chart_count", 0),
                 }
             )
     return {"sheet_count": summary.get("sheet_count", len(sheets)), "sheets": sheets}
@@ -226,3 +231,11 @@ def _normalize_review(payload: dict[str, Any], provider_name: str) -> dict[str, 
         "concerns": [str(item) for item in concerns] if isinstance(concerns, list) else [],
         "suggestions": [str(item) for item in suggestions] if isinstance(suggestions, list) else [],
     }
+
+
+def _revision_prompt_from_review(review: dict[str, Any]) -> str:
+    lines = [
+        *[f"修正问题：{item}" for item in review.get("concerns", [])],
+        *[f"采用建议：{item}" for item in review.get("suggestions", [])],
+    ]
+    return "\n".join(lines)

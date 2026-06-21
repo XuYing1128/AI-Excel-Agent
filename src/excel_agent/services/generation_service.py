@@ -8,6 +8,7 @@ from typing import Any
 
 from openpyxl import load_workbook
 
+from ..custom_workbook_builder import build_custom_workbook, build_dataset_workbook
 from ..task_paths import TaskPaths, append_run_log_event, stage_input_files
 from ..task_spec import TaskSpec, save_task_spec
 from ..workbook_builder import analyze_sales_file, create_workbook
@@ -49,17 +50,39 @@ def generate_from_task_spec(task_spec: TaskSpec, task_paths: TaskPaths) -> Gener
 
         mode = "standard_template"
         used_command = "excel_agent.workbook_builder.create_workbook"
-        if task_spec.task_type == "sales_report" and task_spec.input_files:
+        policy = str(task_spec.options.get("generation_policy", ""))
+        content_plan = task_spec.options.get("content_plan", {})
+        if (
+            policy == "custom_content"
+            and isinstance(content_plan, dict)
+            and content_plan.get("explicit_structure")
+            and not task_spec.input_files
+        ):
+            mode = "custom_content"
+            used_command = "excel_agent.custom_workbook_builder.build_custom_workbook"
+            build_custom_workbook(
+                content_plan,
+                task_paths.output_file,
+                include_charts=task_spec.include_charts,
+            )
+        elif task_spec.task_type == "sales_report" and task_spec.input_files:
             mode = "sales_input_analysis"
             used_command = "excel_agent.workbook_builder.analyze_sales_file"
             analyze_sales_file(task_spec.input_files[0], task_paths.output_file)
+        elif task_spec.input_files:
+            mode = "input_dataset"
+            used_command = "excel_agent.custom_workbook_builder.build_dataset_workbook"
+            build_dataset_workbook(
+                task_spec.input_files[0],
+                task_paths.output_file,
+                title=content_plan.get("title") or task_spec.user_goal[:60],
+                include_summary=task_spec.include_summary,
+                include_charts=task_spec.include_charts,
+            )
+            notices.append("已按上传文件的实际字段生成结果，没有套用无关示例模板。")
         else:
             create_workbook(task_spec.task_type, task_paths.output_file)
-            if task_spec.task_type != "sales_report":
-                notices.append(
-                    "当前版本对该类型主要生成标准模板，不保证自动完成复杂真实数据分析。"
-                )
-            elif task_spec.task_type == "sales_report":
+            if task_spec.task_type == "sales_report":
                 notices.append("未提供销售输入文件，已生成销售报表标准模板示例。")
 
         notices.extend(_apply_task_options(task_paths.output_file, task_spec))
@@ -114,16 +137,22 @@ def _apply_task_options(output_file: Path, task_spec: TaskSpec) -> list[str]:
                 ws._charts = []
                 changed = True
 
-    if not task_spec.include_summary and "Summary" in wb.sheetnames:
+    for summary_name in ("Summary", "汇总"):
+        if task_spec.include_summary or summary_name not in wb.sheetnames:
+            continue
         if task_spec.task_type == "dashboard":
             notices.append("综合仪表盘依赖汇总页，已为避免公式失效保留汇总页。")
         else:
-            wb.remove(wb["Summary"])
+            wb.remove(wb[summary_name])
             changed = True
 
-    if not task_spec.include_instructions_sheet and "Instructions" in wb.sheetnames:
-        if len(wb.sheetnames) > 1:
-            wb.remove(wb["Instructions"])
+    for instruction_name in ("Instructions", "说明"):
+        if (
+            not task_spec.include_instructions_sheet
+            and instruction_name in wb.sheetnames
+            and len(wb.sheetnames) > 1
+        ):
+            wb.remove(wb[instruction_name])
             changed = True
 
     if task_spec.preserve_template_style and task_spec.input_files:

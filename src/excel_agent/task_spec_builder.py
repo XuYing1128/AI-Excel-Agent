@@ -6,6 +6,7 @@ from copy import deepcopy
 from pathlib import Path
 from typing import Any
 
+from .content_plan import build_local_content_plan, suggest_output_name
 from .intent_classifier import KEYWORDS, SUPPORTED_TYPES, classify_intent, normalize_table_type
 from .task_spec import TaskSpec, TaskSpecDraft
 
@@ -43,22 +44,41 @@ def build_task_spec_draft(user_prompt: str, input_files: list[str]) -> TaskSpecD
     files = [str(path) for path in input_files]
     classification = classify_intent(prompt)
     alternatives = _classification_alternatives(prompt)
-    assumptions = _default_assumptions(classification.table_type, prompt, files)
+    content_plan = build_local_content_plan(prompt, classification.table_type, files)
+    assumptions = _default_assumptions(
+        classification.table_type,
+        prompt,
+        files,
+        content_plan,
+    )
+    chart_requested = any(
+        word in prompt.lower() for word in ["图表", "趋势图", "柱状图", "折线图", "dashboard", "看板"]
+    )
+    summary_requested = any(
+        word in prompt.lower() for word in ["汇总页", "统计页", "summary sheet", "dashboard", "看板"]
+    )
+    custom_layout = bool(content_plan.get("explicit_structure"))
     task_spec = TaskSpec(
         task_type=classification.table_type,
         user_goal=prompt or "根据上传文件生成合适的本地电子表格",
         input_files=files,
-        output_name="生成结果.xlsx",
+        output_name=suggest_output_name(
+            prompt,
+            classification.table_type,
+            content_plan.get("title"),
+        ),
         preserve_template_style=bool(
             files
             and any(Path(path).suffix.lower() in {".xlsx", ".xlsm"} for path in files)
             and any(word in prompt for word in ["保留", "参考模板", "原样", "样式"])
         ),
-        include_charts=classification.table_type in CHART_TYPES or any(
-            word in prompt.lower() for word in ["图表", "dashboard", "看板"]
+        include_charts=chart_requested or (
+            classification.table_type in CHART_TYPES and not custom_layout
         ),
-        include_summary=True,
-        include_instructions_sheet=True,
+        include_summary=summary_requested or not custom_layout,
+        include_instructions_sheet=not (
+            custom_layout and content_plan.get("layout") == "single_sheet"
+        ),
         confidence=classification.confidence,
         assumptions=assumptions,
         user_answers={},
@@ -67,8 +87,15 @@ def build_task_spec_draft(user_prompt: str, input_files: list[str]) -> TaskSpecD
             "generation_policy": (
                 "sales_input_analysis"
                 if classification.table_type == "sales_report" and files
+                else "input_dataset"
+                if files
+                else "custom_content"
+                if custom_layout
                 else "standard_template"
             ),
+            "content_plan": content_plan,
+            "chart_requested_explicitly": chart_requested,
+            "summary_sheet_requested_explicitly": summary_requested,
             "model_may_edit_cells": False,
             "deterministic_validation_required": True,
         },
@@ -145,6 +172,10 @@ def merge_user_answers_into_task_spec(task_spec: TaskSpec, answers: dict[str, An
     merged.options["generation_policy"] = (
         "sales_input_analysis"
         if merged.task_type == "sales_report" and merged.input_files
+        else "input_dataset"
+        if merged.input_files
+        else "custom_content"
+        if merged.options.get("content_plan", {}).get("explicit_structure")
         else "standard_template"
     )
     return merged
@@ -158,13 +189,16 @@ def _build_questions(
 ) -> list[str]:
     questions: list[str] = []
     normalized_prompt = prompt.strip()
-    if task_spec.confidence < 0.6:
+    content_plan = task_spec.options.get("content_plan", {})
+    has_explicit_structure = bool(content_plan.get("explicit_structure"))
+    has_inline_records = bool(content_plan.get("records"))
+    if task_spec.confidence < 0.6 and not has_explicit_structure:
         questions.append("系统暂时不能确定表格类型，请确认最接近的表格类型。")
     if not normalized_prompt and input_files:
         questions.append("你希望对上传文件做什么：清洗、分析、生成报表，还是仅套用标准模板？")
     if normalized_prompt in VAGUE_PROMPTS or len(normalized_prompt) < 5:
         questions.append("请补充这张表要解决的具体问题，以及你最希望看到的汇总结果。")
-    if _needs_input_file(normalized_prompt) and not input_files:
+    if _needs_input_file(normalized_prompt) and not input_files and not has_inline_records:
         questions.append("这个需求看起来依赖原始数据；请上传 CSV/XLSX/XLSM，或确认先生成标准模板。")
     if {"sales_report", "ecommerce_analysis"}.issubset(set(alternatives[:3])):
         questions.append("需求同时像销售报表和电商订单分析，请确认更偏向哪一种。")
@@ -187,16 +221,23 @@ def _needs_input_file(prompt: str) -> bool:
     return any(word.lower() in lowered for word in DATA_REQUEST_WORDS)
 
 
-def _default_assumptions(task_type: str, prompt: str, input_files: list[str]) -> list[str]:
-    assumptions = [
-        "所有具体单元格、公式和格式均由确定性 Python 内核处理，大模型不直接修改单元格。",
-        "生成后必须运行确定性校验器；主观模型审查不会替代客观校验。",
-    ]
+def _default_assumptions(
+    task_type: str,
+    prompt: str,
+    input_files: list[str],
+    content_plan: dict[str, Any],
+) -> list[str]:
+    assumptions: list[str] = []
     if not input_files:
-        assumptions.append("当前没有输入文件，将使用标准模板中的示例数据生成示例表格。")
-    if task_type != "sales_report":
+        if content_plan.get("records"):
+            assumptions.append("将使用需求文字中提供的数据生成表格。")
+        elif content_plan.get("explicit_structure"):
+            assumptions.append("未提供数据文件，将按指定列生成可填写表格。")
+        else:
+            assumptions.append("未提供原始数据，将生成该类型的可填写示例。")
+    if not content_plan.get("explicit_structure") and task_type == "generic_table":
         assumptions.append(
-            "当前版本对该类型主要生成标准模板，不保证自动完成复杂真实数据分析。"
+            "需求中未识别到明确列结构，将先生成通用可填写表格。"
         )
     if task_type in {"quotation", "invoice_draft", "finance_model", "attendance"}:
         assumptions.append("该任务包含高风险业务结果，必须由人工复核。")

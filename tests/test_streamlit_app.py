@@ -11,11 +11,16 @@ def test_streamlit_app_initial_page_loads():
     assert not app.exception
     assert any("本地表格助手" in item.value for item in app.markdown)
     assert any(button.label == "分析需求" for button in app.button)
-    assert any(expander.label == "接口设置" for expander in app.expander)
+    assert any(button.label == "接口设置" for button in app.button)
+    assert not any("无需账号" in item.value for item in app.markdown)
 
 
 def test_streamlit_confirmed_task_generates_and_validates(tmp_path, monkeypatch):
     monkeypatch.setenv("AI_EXCEL_OUTPUTS_DIR", str(tmp_path / "outputs"))
+    monkeypatch.setenv(
+        "AI_EXCEL_API_SETTINGS_FILE",
+        str(tmp_path / "private" / "api_settings.json"),
+    )
     app_path = Path(__file__).resolve().parents[1] / "app.py"
     app = AppTest.from_file(str(app_path), default_timeout=30).run()
 
@@ -27,7 +32,7 @@ def test_streamlit_confirmed_task_generates_and_validates(tmp_path, monkeypatch)
     next(button for button in app.button if button.label == "确认并生成").click()
     app.run()
     assert not app.exception
-    task_outputs = list((tmp_path / "outputs" / "tasks").glob("*/output/result.xlsx"))
+    task_outputs = list((tmp_path / "outputs" / "tasks").glob("*/output/*.xlsx"))
     validation_reports = list(
         (tmp_path / "outputs" / "tasks").glob("*/reports/validation.json")
     )
@@ -42,13 +47,17 @@ def test_streamlit_can_save_local_custom_api_settings(tmp_path, monkeypatch):
     app_path = Path(__file__).resolve().parents[1] / "app.py"
     app = AppTest.from_file(str(app_path), default_timeout=20).run()
 
+    next(button for button in app.button if button.label == "接口设置").click()
+    app.run()
+    next(button for button in app.button if button.label == "编辑接口设置").click()
+    app.run()
     next(item for item in app.text_input if item.label == "接口名称").input("测试模型")
     next(item for item in app.text_input if item.label == "接口地址").input(
         "https://example.com/v1"
     )
     next(item for item in app.text_input if item.label == "模型名称").input("model")
     next(item for item in app.text_input if item.label == "接口密钥").input("secret")
-    next(item for item in app.checkbox if item.label == "启用自定义接口").check()
+    next(item for item in app.checkbox if item.label == "启用这个接口").check()
     next(button for button in app.button if button.label == "保存设置").click()
     app.run()
 

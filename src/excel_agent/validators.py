@@ -10,7 +10,11 @@ from pathlib import Path
 from typing import Any, Iterable
 
 from openpyxl import load_workbook
-from openpyxl.utils.cell import column_index_from_string, get_column_letter
+from openpyxl.utils.cell import (
+    column_index_from_string,
+    get_column_letter,
+    range_boundaries,
+)
 
 from .io_utils import save_json
 
@@ -95,10 +99,43 @@ def inspect_workbook(path: str | Path) -> dict[str, Any]:
                 "auto_filter": ws.auto_filter.ref,
                 "freeze_panes": str(ws.freeze_panes) if ws.freeze_panes else None,
                 "merged_ranges": [str(rng) for rng in ws.merged_cells.ranges],
+                "title": ws["A1"].value,
+                "header_row": (
+                    _header_info(ws).get("row") if _header_info(ws) is not None else None
+                ),
+                "headers": (
+                    [
+                        str(value)
+                        for value in _header_info(ws).get("headers", [])
+                        if not _is_blank(value)
+                    ]
+                    if _header_info(ws) is not None
+                    else []
+                ),
+                "formula_columns": _formula_column_names(ws),
+                "chart_count": len(ws._charts),
             }
             for ws in wb.worksheets
         ],
     }
+
+
+def _formula_column_names(ws) -> list[str]:
+    header = _header_info(ws)
+    if header is None:
+        return []
+    row = int(header["row"])
+    result: list[str] = []
+    for column, name in enumerate(header["headers"], start=1):
+        if _is_blank(name):
+            continue
+        if any(
+            isinstance(ws.cell(data_row, column).value, str)
+            and ws.cell(data_row, column).value.startswith("=")
+            for data_row in range(row + 1, min(ws.max_row, row + 20) + 1)
+        ):
+            result.append(str(name))
+    return result
 
 
 def to_json(report: dict[str, Any]) -> str:
@@ -155,14 +192,29 @@ def _check_workbook_level(wb, report: dict[str, Any]) -> None:
     if not has_content:
         _add_error(report, "empty_workbook", "workbook 所有 sheet 都为空。", suggestion="写入说明页、数据页或汇总页。")
 
-    instruction_present = any(_is_instruction_sheet(ws.title) for ws in wb.worksheets)
-    data_present = any(_is_data_sheet(ws.title) for ws in wb.worksheets)
+    instruction_present = any(
+        _is_instruction_sheet(ws.title) or _has_instruction_note(ws)
+        for ws in wb.worksheets
+    )
+    data_present = any(
+        _is_data_sheet(ws.title) or bool(ws.auto_filter.ref)
+        for ws in wb.worksheets
+    )
     report["summary"]["instruction_sheet_present"] = instruction_present
     report["summary"]["data_sheet_present"] = data_present
     if not instruction_present:
         _add_warning(report, "instruction_sheet", "缺少 Instructions/README/说明 sheet。", suggestion="添加说明页，描述输入区、公式区和校验方式。")
     if not data_present:
         _add_warning(report, "data_sheet", "未识别到 Data/Input/输入/数据 sheet。", suggestion="至少提供一个数据页或输入区。")
+
+
+def _has_instruction_note(ws) -> bool:
+    for row in ws.iter_rows(min_row=1, max_row=min(ws.max_row, 8)):
+        for cell in row:
+            value = str(cell.value or "")
+            if any(word in value for word in ("使用说明", "录入内容", "自动计算", "填写说明")):
+                return True
+    return False
 
 
 def _check_sheet_level(ws, report: dict[str, Any]) -> None:
@@ -433,7 +485,15 @@ def _header_info(ws) -> dict[str, Any] | None:
 
     data_rows: list[int] = []
     non_formula_data_rows: list[int] = []
-    for row in range(header_row + 1, ws.max_row + 1):
+    data_limit = ws.max_row
+    if ws.auto_filter.ref:
+        try:
+            _, filter_min_row, _, filter_max_row = range_boundaries(ws.auto_filter.ref)
+            if filter_min_row == header_row:
+                data_limit = min(data_limit, filter_max_row)
+        except ValueError:
+            pass
+    for row in range(header_row + 1, data_limit + 1):
         cells = [ws.cell(row, col) for col in range(1, max(last_header_idx, 1) + 1)]
         if any(not _is_blank(cell.value) for cell in cells):
             data_rows.append(row)

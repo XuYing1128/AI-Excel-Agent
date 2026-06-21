@@ -15,7 +15,7 @@ class TaskSpec:
     task_type: str
     user_goal: str
     input_files: list[str] = field(default_factory=list)
-    output_name: str = "生成结果.xlsx"
+    output_name: str = "自定义表格.xlsx"
     preserve_template_style: bool = False
     include_charts: bool = False
     include_summary: bool = True
@@ -30,7 +30,7 @@ class TaskSpec:
             raise ValueError(f"不支持的 task_type: {self.task_type}")
         self.user_goal = str(self.user_goal).strip()
         self.input_files = [str(path) for path in self.input_files]
-        self.output_name = Path(str(self.output_name or "生成结果.xlsx")).name
+        self.output_name = Path(str(self.output_name or "自定义表格.xlsx")).name
         if not self.output_name.lower().endswith(".xlsx"):
             self.output_name = f"{self.output_name}.xlsx"
         self.confidence = max(0.0, min(1.0, float(self.confidence)))

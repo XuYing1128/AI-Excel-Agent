@@ -51,6 +51,7 @@ def create_task_paths(
     task_type: str,
     base_dir: str | Path | None = None,
     now: datetime | None = None,
+    output_name: str | None = None,
 ) -> TaskPaths:
     resolved_type = normalize_table_type(task_type)
     if resolved_type not in SUPPORTED_TYPES:
@@ -70,6 +71,9 @@ def create_task_paths(
     for directory in (input_dir, output_dir, reports_dir):
         directory.mkdir(parents=True, exist_ok=False)
 
+    safe_output_name = sanitize_filename(output_name or "result.xlsx", fallback="result.xlsx")
+    if not safe_output_name.lower().endswith(".xlsx"):
+        safe_output_name = f"{safe_output_name}.xlsx"
     return TaskPaths(
         task_id=task_id,
         task_dir=task_dir,
@@ -78,7 +82,38 @@ def create_task_paths(
         reports_dir=reports_dir,
         task_spec_file=task_dir / "task_spec.json",
         run_log_file=task_dir / "run_log.json",
-        output_file=output_dir / "result.xlsx",
+        output_file=output_dir / safe_output_name,
+        validation_report=reports_dir / "validation.json",
+        subjective_review_report=reports_dir / "subjective_review.json",
+    )
+
+
+def existing_task_paths(
+    task_id: str,
+    output_file: str | Path | None = None,
+    base_dir: str | Path | None = None,
+) -> TaskPaths:
+    task_dir = tasks_root(base_dir) / sanitize_filename(task_id, fallback="task")
+    if not task_dir.exists():
+        raise FileNotFoundError(f"任务目录不存在: {task_dir}")
+    input_dir = task_dir / "input"
+    output_dir = task_dir / "output"
+    reports_dir = task_dir / "reports"
+    candidate = Path(output_file) if output_file else None
+    if candidate is None or not candidate.exists():
+        files = sorted(output_dir.glob("*.xlsx"))
+        if not files:
+            raise FileNotFoundError(f"任务没有可用的 xlsx: {task_dir}")
+        candidate = files[0]
+    return TaskPaths(
+        task_id=task_id,
+        task_dir=task_dir,
+        input_dir=input_dir,
+        output_dir=output_dir,
+        reports_dir=reports_dir,
+        task_spec_file=task_dir / "task_spec.json",
+        run_log_file=task_dir / "run_log.json",
+        output_file=candidate,
         validation_report=reports_dir / "validation.json",
         subjective_review_report=reports_dir / "subjective_review.json",
     )
