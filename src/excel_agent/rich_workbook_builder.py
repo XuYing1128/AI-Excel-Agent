@@ -60,7 +60,7 @@ def build_rich_workbook(
     title_cell.alignment = Alignment(horizontal="center", vertical="center")
     ws.row_dimensions[title_row].height = 30
     ws.merge_cells(start_row=2, start_column=1, end_row=2, end_column=max_col)
-    note = "填写说明：基础数据为输入项，季度统计、等级、小计和总计由公式自动计算。"
+    note = "填写说明：基础数据为输入项，自动计算列、汇总和图表会随数据更新。"
     if plan.get("notes"):
         note = f"填写说明：{plan['notes'][0]}"
     ws.cell(2, 1, note)
@@ -330,7 +330,10 @@ def _write_grand_total_row(
     column_map: dict[str, int],
     config: dict[str, Any],
 ) -> None:
-    label_keys = config.get("merge_label_keys") or [item["key"] for item in columns[:3]]
+    label_keys = config.get("merge_label_keys") or _default_total_label_keys(
+        columns,
+        config,
+    )
     label_indices = [column_map[key] for key in label_keys if key in column_map]
     if label_indices:
         start, end = min(label_indices), max(label_indices)
@@ -343,6 +346,33 @@ def _write_grand_total_row(
         cell.fill = PatternFill("solid", fgColor="B4C6E7")
         cell.font = Font(name="Microsoft YaHei", bold=True, color="10243A")
         cell.border = Border(top=Side(style="medium", color="50677F"), bottom=THIN_GRAY)
+
+
+def _default_total_label_keys(
+    columns: list[dict[str, Any]],
+    config: dict[str, Any],
+) -> list[str]:
+    """Choose label cells that cannot overlap aggregate/formula targets."""
+
+    protected = {
+        *config.get("sum_keys", []),
+        *config.get("average_keys", []),
+        *config.get("average_from", {}).keys(),
+        *config.get("value_map", {}).keys(),
+    }
+    candidates: list[str] = []
+    for column in columns:
+        key = column["key"]
+        if key in protected or column.get("formula"):
+            break
+        candidates.append(key)
+    if not candidates:
+        candidates = [
+            column["key"]
+            for column in columns
+            if column["key"] not in protected
+        ][:1]
+    return candidates
 
 
 def _write_aggregate_cells(
@@ -651,6 +681,7 @@ def _normalize_summary_config(value: Any, keys: set[str]) -> dict[str, Any] | No
             for key, item in value_map.items()
             if str(key) in keys
             and isinstance(item, (str, int, float, bool))
+            and not (isinstance(item, str) and not item.strip())
             and not (isinstance(item, str) and item.startswith("="))
         }
         if isinstance(value_map, dict)

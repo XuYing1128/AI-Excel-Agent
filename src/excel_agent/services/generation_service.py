@@ -16,6 +16,9 @@ from ..workbook_builder import analyze_sales_file, create_workbook
 from .llm_workbook_agent import generate_with_llm_agent
 
 
+GENERATION_API_VERSION = 2
+
+
 @dataclass
 class GenerationResult:
     success: bool

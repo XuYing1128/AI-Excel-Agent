@@ -31,8 +31,8 @@ from excel_agent.preview import (
 )
 from excel_agent.services.api_task_planner import enhance_task_spec_draft
 from excel_agent.services.custom_api_service import test_api_connection
-from excel_agent.services.generation_service import generate_from_task_spec
 from excel_agent.services.revision_service import build_revision_task_spec
+from excel_agent.services.runtime_compat import load_generation_service
 from excel_agent.services.subjective_review_service import run_subjective_review
 from excel_agent.services.validation_service import validate_generated_workbook
 from excel_agent.task_paths import (
@@ -42,7 +42,7 @@ from excel_agent.task_paths import (
     existing_task_paths,
     save_uploaded_bytes,
 )
-from excel_agent.task_spec import TaskSpec, load_task_spec, save_task_spec
+from excel_agent.task_spec import TaskSpec, TaskSpecDraft, load_task_spec, save_task_spec
 from excel_agent.task_spec_builder import (
     TYPE_LABELS,
     build_task_spec_draft,
@@ -307,7 +307,19 @@ def apply_clarification() -> None:
             for index, question in enumerate(st.session_state.clarifying_questions)
         },
     }
-    st.session_state.task_spec = merge_user_answers_into_task_spec(spec, answers)
+    merged = merge_user_answers_into_task_spec(spec, answers)
+    refined = enhance_task_spec_draft(
+        TaskSpecDraft(
+            task_spec=merged,
+            clarifying_questions=[],
+            classification_alternatives=[],
+        ),
+        user_prompt=merged.user_goal,
+        input_file_names=[item["name"] for item in st.session_state.uploaded_files],
+        settings=st.session_state.api_settings,
+    )
+    st.session_state.task_spec = refined.draft.task_spec
+    st.session_state.analysis_message = refined.message
     st.session_state.clarification_done = True
 
 
@@ -335,7 +347,8 @@ def execute_generation(
             spec.input_files = staged_files
         save_task_spec(spec, task_paths.task_spec_file)
 
-        generation = generate_from_task_spec(
+        generation_service = load_generation_service()
+        generation = generation_service.generate_from_task_spec(
             spec,
             task_paths,
             api_settings=st.session_state.api_settings,
@@ -687,22 +700,78 @@ def render_plan(spec: TaskSpec) -> None:
         )
 
 
+def render_requirement_check(spec: TaskSpec) -> None:
+    plan = spec.options.get("content_plan", {})
+    columns = [item for item in plan.get("columns", []) if item.get("name")]
+    formulas = [item for item in plan.get("formula_rules", []) if item.get("target")]
+    rows = int(plan.get("expected_data_rows") or 0)
+    checks = [
+        ("用途", TYPE_LABELS.get(spec.task_type, "通用表格")),
+        (
+            "数据",
+            f"已识别 {rows} 条文字数据"
+            if rows
+            else f"将使用 {len(spec.input_files)} 个输入文件"
+            if spec.input_files
+            else "未提供数据，将创建可填写内容",
+        ),
+        (
+            "结构",
+            f"已明确 {len(columns)} 列"
+            if columns
+            else "将采用该类型的标准结构，可在下方继续补充",
+        ),
+        (
+            "计算",
+            f"已识别 {len(formulas)} 项自动计算"
+            if formulas
+            else "将依据最终需求和表格类型设置必要公式",
+        ),
+    ]
+    st.markdown("**需求检查结果**")
+    check_columns = st.columns(4)
+    for container, (label, value) in zip(check_columns, checks):
+        with container:
+            plan_card(label, value)
+    model_summary = str(spec.options.get("model_goal_summary") or "").strip()
+    if model_summary:
+        st.caption(f"整理后的目标：{model_summary}")
+
+
 def render_clarification(spec: TaskSpec) -> None:
     nonce = st.session_state.analysis_nonce
+    gaps = {
+        str(item.get("question")): item
+        for item in spec.options.get("requirement_gaps", [])
+        if isinstance(item, dict)
+    }
     with st.container(border=True):
-        st.subheader("补充信息")
-        st.caption("为了避免生成与需求无关的模板，请补充下面的信息。")
+        st.subheader("完善生成要求")
+        st.caption("下面这些内容会直接影响表格结构和计算结果。补充后，系统会重新整理生成方案。")
+        render_requirement_check(spec)
         for index, question in enumerate(st.session_state.clarifying_questions):
-            st.text_input(question, key=f"clarification_{nonce}_{index}")
+            gap = gaps.get(question, {})
+            if gap.get("title"):
+                st.markdown(f"**{gap['title']}**")
+            st.text_area(
+                question,
+                placeholder=str(gap.get("example") or "请尽量写清楚具体字段、计算口径或样式要求。"),
+                key=f"clarification_{nonce}_{index}",
+                height=88,
+            )
         type_index = SUPPORTED_TYPES.index(spec.task_type)
         st.selectbox(
-            "最接近的表格类型",
+            "确认表格类型",
             SUPPORTED_TYPES,
             index=type_index,
             format_func=lambda value: TYPE_LABELS.get(value, "通用表格"),
             key=f"clarify_type_{nonce}",
         )
-        st.text_area("其他要求", key=f"clarify_detail_{nonce}")
+        st.text_area(
+            "其他必须满足的要求",
+            placeholder="例如：工作表名称、是否保留原模板、打印方向、冻结位置、颜色规范、不能出现的内容。",
+            key=f"clarify_detail_{nonce}",
+        )
         st.radio(
             "没有原始数据时",
             ["template", "upload"],
@@ -712,7 +781,28 @@ def render_clarification(spec: TaskSpec) -> None:
             horizontal=True,
             key=f"clarify_data_mode_{nonce}",
         )
-        if st.button("确认补充信息", type="primary", width="stretch"):
+        use_defaults = st.checkbox(
+            "未填写的可选项按系统建议处理",
+            value=False,
+            key=f"use_defaults_{nonce}",
+        )
+        if st.button("补充完成，重新整理方案", type="primary", width="stretch"):
+            required_questions = {
+                item.get("question")
+                for item in gaps.values()
+                if item.get("required", True)
+            }
+            unanswered = [
+                question
+                for index, question in enumerate(st.session_state.clarifying_questions)
+                if question in required_questions
+                and not str(
+                    st.session_state.get(f"clarification_{nonce}_{index}", "")
+                ).strip()
+            ]
+            if unanswered and not use_defaults:
+                st.warning("仍有会影响结果的必填信息未补充；请填写，或勾选按系统建议处理。")
+                return
             apply_clarification()
             st.rerun()
 
@@ -721,6 +811,8 @@ def render_confirmation(spec: TaskSpec) -> None:
     nonce = st.session_state.analysis_nonce
     with st.container(border=True):
         st.subheader("确认生成内容")
+        st.success("需求检查已完成。请核对下面的结构和选项，确认后再生成。")
+        render_requirement_check(spec)
         spec.output_name = st.text_input(
             "文件名称",
             value=spec.output_name,
@@ -1040,8 +1132,8 @@ def render_workbench() -> None:
             accept_multiple_files=True,
             help="支持 CSV、XLSX、XLSM。",
         )
-        if st.button("分析需求", type="primary", width="stretch"):
-            with st.spinner("正在整理表格内容……"):
+        if st.button("检查并完善需求", type="primary", width="stretch"):
+            with st.spinner("正在逐项检查数据、字段、计算、汇总和图表要求……"):
                 analyze_request(prompt, list(uploads or []))
             st.rerun()
 

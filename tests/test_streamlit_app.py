@@ -10,7 +10,7 @@ def test_streamlit_app_initial_page_loads():
     app = AppTest.from_file(str(app_path), default_timeout=15).run()
     assert not app.exception
     assert any("本地表格助手" in item.value for item in app.markdown)
-    assert any(button.label == "分析需求" for button in app.button)
+    assert any(button.label == "检查并完善需求" for button in app.button)
     assert any(button.label == "接口设置" for button in app.button)
     assert not any("无需账号" in item.value for item in app.markdown)
 
@@ -25,7 +25,7 @@ def test_streamlit_confirmed_task_generates_and_validates(tmp_path, monkeypatch)
     app = AppTest.from_file(str(app_path), default_timeout=30).run()
 
     app.text_area[0].input("帮我生成个人月度收支预算表")
-    next(button for button in app.button if button.label == "分析需求").click()
+    next(button for button in app.button if button.label == "检查并完善需求").click()
     app.run()
     assert any(button.label == "确认并生成" for button in app.button)
 

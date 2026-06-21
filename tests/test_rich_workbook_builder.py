@@ -1,6 +1,7 @@
 from openpyxl import load_workbook
 
 from excel_agent.rich_workbook_builder import build_rich_workbook, inspect_rich_workbook
+from excel_agent.validators import validate_workbook
 
 
 def sales_blueprint():
@@ -118,3 +119,40 @@ def test_rich_builder_supports_multilevel_headers_subtotals_sort_and_chart(tmp_p
     inspection = inspect_rich_workbook(path)
     assert inspection["sheets"][0]["chart_count"] == 1
     assert inspection["sheets"][0]["conditional_format_count"] == 3
+
+
+def test_grand_total_default_merge_does_not_overlap_sum_columns(tmp_path):
+    blueprint = {
+        "title": "预算表",
+        "sheet_name": "预算",
+        "columns": [
+            {"key": "category", "label": "类别", "type": "text"},
+            {"key": "item", "label": "项目", "type": "text"},
+            {"key": "budget", "label": "预算金额", "type": "money"},
+            {"key": "actual", "label": "实际金额", "type": "money"},
+            {
+                "key": "difference",
+                "label": "差额",
+                "type": "money",
+                "formula": "={budget}-{actual}",
+            },
+        ],
+        "records": [
+            {"category": "餐饮", "item": "午餐", "budget": 1000, "actual": 900},
+            {"category": "交通", "item": "地铁", "budget": 500, "actual": 450},
+        ],
+        "grand_total": {
+            "label": "合计",
+            "sum_keys": ["budget", "actual", "difference"],
+            "value_map": {"category": "", "item": ""},
+        },
+    }
+
+    path = build_rich_workbook(blueprint, tmp_path / "budget.xlsx")
+    ws = load_workbook(path, data_only=False)["预算"]
+
+    assert ws["A6"].value == "合计"
+    assert "A6:B6" in {str(item) for item in ws.merged_cells.ranges}
+    assert ws["C6"].value == "=SUM(C4:C5)"
+    assert ws["D6"].value == "=SUM(D4:D5)"
+    assert validate_workbook(path)["status"] == "pass"

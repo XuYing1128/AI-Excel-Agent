@@ -191,3 +191,29 @@ def test_llm_agent_corrects_plain_text_reply_and_retries_tool_call(
 
     assert result.success is True
     assert result.tool_calls == 2
+
+
+def test_blueprint_revision_replaces_duplicate_business_columns():
+    previous = {
+        "title": "预算表",
+        "sheet_name": "预算",
+        "columns": [
+            {"key": "cat", "label": "类别", "type": "text"},
+            {"key": "bud", "label": "预算金额", "type": "money"},
+        ],
+        "records": [{"cat": "餐饮", "bud": 1000}],
+    }
+    revision = {
+        "title": "预算表",
+        "sheet_name": "预算",
+        "columns": [
+            {"key": "category", "label": "类别", "type": "text"},
+            {"key": "budget", "label": "预算金额", "type": "money"},
+        ],
+        "records": [],
+    }
+
+    merged = agent._merge_blueprint_revision(previous, revision)
+
+    assert [item["label"] for item in merged["columns"]] == ["类别", "预算金额"]
+    assert merged["records"] == [{"category": "餐饮", "budget": 1000}]

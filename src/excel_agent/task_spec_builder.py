@@ -8,6 +8,7 @@ from typing import Any
 
 from .content_plan import build_local_content_plan, suggest_output_name
 from .intent_classifier import KEYWORDS, SUPPORTED_TYPES, classify_intent, normalize_table_type
+from .requirement_analysis import analyze_requirement_gaps, questions_from_gaps
 from .task_spec import TaskSpec, TaskSpecDraft
 
 
@@ -100,7 +101,16 @@ def build_task_spec_draft(user_prompt: str, input_files: list[str]) -> TaskSpecD
             "deterministic_validation_required": True,
         },
     )
-    questions = _build_questions(task_spec, prompt, files, alternatives)
+    gaps = analyze_requirement_gaps(
+        prompt,
+        task_spec.task_type,
+        files,
+        content_plan,
+        confidence=task_spec.confidence,
+        alternatives=alternatives,
+    )
+    task_spec.options["requirement_gaps"] = [item.to_dict() for item in gaps]
+    questions = questions_from_gaps(gaps)
     return TaskSpecDraft(
         task_spec=task_spec,
         clarifying_questions=questions[:5],
@@ -112,12 +122,15 @@ def get_clarifying_questions(task_spec_or_context: TaskSpecDraft | TaskSpec | di
     if isinstance(task_spec_or_context, TaskSpecDraft):
         return list(task_spec_or_context.clarifying_questions)
     if isinstance(task_spec_or_context, TaskSpec):
-        return _build_questions(
-            task_spec_or_context,
+        gaps = analyze_requirement_gaps(
             task_spec_or_context.user_goal,
+            task_spec_or_context.task_type,
             task_spec_or_context.input_files,
-            _classification_alternatives(task_spec_or_context.user_goal),
-        )[:5]
+            task_spec_or_context.options.get("content_plan", {}),
+            confidence=task_spec_or_context.confidence,
+            alternatives=_classification_alternatives(task_spec_or_context.user_goal),
+        )
+        return questions_from_gaps(gaps)
     prompt = str(task_spec_or_context.get("user_prompt", ""))
     files = [str(path) for path in task_spec_or_context.get("input_files", [])]
     return build_task_spec_draft(prompt, files).clarifying_questions
@@ -167,6 +180,17 @@ def merge_user_answers_into_task_spec(task_spec: TaskSpec, answers: dict[str, An
         if useful:
             merged.user_goal = f"{merged.user_goal}\n补充回答：" + "；".join(useful)
 
+    refreshed_plan = build_local_content_plan(
+        merged.user_goal,
+        merged.task_type,
+        merged.input_files,
+    )
+    current_plan = merged.options.get("content_plan", {})
+    if refreshed_plan.get("explicit_structure") or refreshed_plan.get("records"):
+        merged.options["content_plan"] = refreshed_plan
+    elif current_plan:
+        merged.options["content_plan"] = current_plan
+
     merged.user_answers.update(clean_answers)
     merged.options["clarification_rounds"] = 1
     merged.options["generation_policy"] = (
@@ -178,6 +202,7 @@ def merge_user_answers_into_task_spec(task_spec: TaskSpec, answers: dict[str, An
         if merged.options.get("content_plan", {}).get("explicit_structure")
         else "standard_template"
     )
+    merged.options["requirement_gaps"] = []
     return merged
 
 

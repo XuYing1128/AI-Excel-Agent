@@ -479,7 +479,7 @@ def _check_merged_filter_area(ws, report: dict[str, Any]) -> None:
             continue
         top_left = ws.cell(merged.min_row, merged.min_col).value
         if merged.min_row == merged.max_row and any(
-            word in str(top_left or "") for word in ("小计", "总计")
+            word in str(top_left or "") for word in ("小计", "总计", "合计")
         ):
             continue
         merged_cells = {cell.coordinate for row in ws[str(merged)] for cell in row}

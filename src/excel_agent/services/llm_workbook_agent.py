@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 from dataclasses import asdict, dataclass
 from copy import deepcopy
 from pathlib import Path
@@ -511,6 +512,23 @@ def _blueprint_requirement_issues(
                 "列顺序必须为：区域、省份、销售员、1月、2月、3月、"
                 "季度总额、季度平均、业绩等级。"
             )
+    requested_labels = _extract_requested_column_order(prompt)
+    actual_labels = [str(item.get("label", "")).strip() for item in columns]
+    if requested_labels and not _column_order_matches(requested_labels, actual_labels):
+        issues.append(
+            "生成列必须严格对应用户指定的列顺序，不能重复、遗漏或增加无关列。"
+            f"要求：{'、'.join(requested_labels)}；当前：{'、'.join(actual_labels)}。"
+        )
+    normalized_labels = [_normalize_label(item) for item in actual_labels]
+    duplicates = sorted(
+        {
+            label
+            for label in normalized_labels
+            if label and normalized_labels.count(label) > 1
+        }
+    )
+    if duplicates:
+        issues.append("存在重复业务列：" + "、".join(duplicates) + "。")
     return issues
 
 
@@ -532,6 +550,36 @@ def _count_inline_data_rows(prompt: str) -> int:
     return count
 
 
+def _extract_requested_column_order(prompt: str) -> list[str]:
+    match = re.search(
+        r"(?:列顺序(?:必须)?(?:严格)?(?:固定)?为|列顺序|列为|表头为)"
+        r"\s*[：:]\s*([^\r\n。]+)",
+        str(prompt),
+    )
+    if not match:
+        return []
+    values = [
+        item.strip(" `\"“”'")
+        for item in re.split(r"[、，,；;|]", match.group(1))
+    ]
+    return [item for item in values if item][:30]
+
+
+def _column_order_matches(expected: list[str], actual: list[str]) -> bool:
+    if len(expected) != len(actual):
+        return False
+    return all(
+        _normalize_label(wanted) == _normalize_label(found)
+        or _normalize_label(wanted) in _normalize_label(found)
+        or _normalize_label(found) in _normalize_label(wanted)
+        for wanted, found in zip(expected, actual)
+    )
+
+
+def _normalize_label(value: str) -> str:
+    return re.sub(r"[\s（）()_\-—:：]", "", str(value)).lower()
+
+
 def _merge_blueprint_revision(
     previous: dict[str, Any] | None,
     revision: dict[str, Any],
@@ -545,21 +593,36 @@ def _merge_blueprint_revision(
         if revision.get(field):
             merged[field] = revision[field]
     if revision.get("columns"):
-        old_by_key = {item["key"]: item for item in merged.get("columns", [])}
+        old_columns = list(merged.get("columns", []))
+        old_by_key = {item["key"]: item for item in old_columns}
+        old_by_label = {
+            _normalize_label(str(item.get("label", ""))): item
+            for item in old_columns
+            if item.get("label")
+        }
         combined = []
+        key_remap: dict[str, str] = {}
         for item in revision["columns"]:
-            base = deepcopy(old_by_key.get(item["key"], {}))
+            old_item = old_by_key.get(item["key"]) or old_by_label.get(
+                _normalize_label(str(item.get("label", "")))
+            )
+            base = deepcopy(old_item or {})
             for key, value in item.items():
                 if value not in ("", None, []):
                     base[key] = value
+            if old_item and old_item["key"] != base["key"]:
+                key_remap[old_item["key"]] = base["key"]
             combined.append(base)
-        revised_keys = {item["key"] for item in combined}
-        combined.extend(
-            deepcopy(item)
-            for item in merged.get("columns", [])
-            if item["key"] not in revised_keys
-        )
         merged["columns"] = combined
+        if key_remap and not revision.get("records"):
+            remapped_records = []
+            for record in merged.get("records", []):
+                remapped = dict(record)
+                for old_key, new_key in key_remap.items():
+                    if old_key in remapped and new_key not in remapped:
+                        remapped[new_key] = remapped.pop(old_key)
+                remapped_records.append(remapped)
+            merged["records"] = remapped_records
     if revision.get("records"):
         merged["records"] = revision["records"]
     for field in (
