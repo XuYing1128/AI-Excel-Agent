@@ -4,14 +4,16 @@ from __future__ import annotations
 
 from dataclasses import asdict, dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 from openpyxl import load_workbook
 
+from ..api_settings import ApiSettings
 from ..custom_workbook_builder import build_custom_workbook, build_dataset_workbook
 from ..task_paths import TaskPaths, append_run_log_event, stage_input_files
 from ..task_spec import TaskSpec, save_task_spec
 from ..workbook_builder import analyze_sales_file, create_workbook
+from .llm_workbook_agent import generate_with_llm_agent
 
 
 @dataclass
@@ -23,12 +25,20 @@ class GenerationResult:
     used_command: str | None
     mode: str
     notices: list[str]
+    agent_tool_calls: int = 0
+    agent_rounds: int = 0
+    blueprint_file: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
 
 
-def generate_from_task_spec(task_spec: TaskSpec, task_paths: TaskPaths) -> GenerationResult:
+def generate_from_task_spec(
+    task_spec: TaskSpec,
+    task_paths: TaskPaths,
+    api_settings: ApiSettings | None = None,
+    progress: Callable[[str, str], None] | None = None,
+) -> GenerationResult:
     """Generate one workbook without allowing a model to touch cells."""
 
     append_run_log_event(
@@ -48,6 +58,39 @@ def generate_from_task_spec(task_spec: TaskSpec, task_paths: TaskPaths) -> Gener
             task_spec.input_files = stage_input_files(task_spec.input_files, task_paths)
         save_task_spec(task_spec, task_paths.task_spec_file)
 
+        settings = api_settings or ApiSettings()
+        if settings.configured and settings.use_for_generation:
+            agent = generate_with_llm_agent(
+                task_spec,
+                task_paths,
+                settings,
+                progress=progress,
+            )
+            if not agent.success:
+                raise RuntimeError(agent.error or agent.message)
+            save_task_spec(task_spec, task_paths.task_spec_file)
+            result = GenerationResult(
+                success=True,
+                output_file=agent.output_file,
+                message=agent.message,
+                error=None,
+                used_command="excel_agent.services.llm_workbook_agent.generate_with_llm_agent",
+                mode="llm_tool_agent",
+                notices=agent.notices,
+                agent_tool_calls=agent.tool_calls,
+                agent_rounds=agent.rounds,
+                blueprint_file=agent.blueprint_file,
+            )
+            append_run_log_event(
+                task_paths,
+                event="generation_completed",
+                status="success",
+                details=result.to_dict(),
+            )
+            return result
+
+        if progress:
+            progress("build", "未启用大模型生成，正在使用本地确定性生成器……")
         mode = "standard_template"
         used_command = "excel_agent.workbook_builder.create_workbook"
         policy = str(task_spec.options.get("generation_policy", ""))

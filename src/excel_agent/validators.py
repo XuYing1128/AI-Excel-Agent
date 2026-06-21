@@ -75,6 +75,8 @@ def validate_workbook(path: str | Path, output_json: str | Path | None = None) -
     for ws in wb.worksheets:
         cached_ws = cached_wb[ws.title] if ws.title in cached_wb.sheetnames else None
         _check_sheet_level(ws, report)
+        if ws.title.startswith("_图表数据"):
+            continue
         header = _header_info(ws)
         _check_headers(ws, header, report)
         _check_formula_cells(ws, cached_ws, header, report)
@@ -239,7 +241,11 @@ def _check_headers(ws, header: dict[str, Any] | None, report: dict[str, Any]) ->
         _add_warning(report, "headers", "未识别到表头。", sheet=ws.title)
         return
 
-    empty_positions = [idx for idx, value in enumerate(headers, start=1) if _is_blank(value)]
+    empty_positions = [
+        idx
+        for idx, value in enumerate(headers, start=1)
+        if _is_blank(value) and not _merged_header_covered(ws, row, idx)
+    ]
     if empty_positions:
         _add_warning(report, "empty_header", f"表头存在空白单元格: {empty_positions[:8]}", sheet=ws.title, row=row)
 
@@ -465,12 +471,27 @@ def _check_data_quality(ws, cached_ws, header: dict[str, Any] | None, report: di
 def _check_merged_filter_area(ws, report: dict[str, Any]) -> None:
     if not ws.auto_filter.ref:
         return
+    header_row = _find_header_row(ws) or 0
     filter_range = ws[ws.auto_filter.ref]
     filter_cells = {cell.coordinate for row in filter_range for cell in row}
     for merged in ws.merged_cells.ranges:
+        if merged.min_row <= header_row:
+            continue
+        top_left = ws.cell(merged.min_row, merged.min_col).value
+        if merged.min_row == merged.max_row and any(
+            word in str(top_left or "") for word in ("小计", "总计")
+        ):
+            continue
         merged_cells = {cell.coordinate for row in ws[str(merged)] for cell in row}
         if filter_cells & merged_cells:
             _add_warning(report, "merged_filter_area", f"合并单元格 {merged} 与筛选区域重叠。", sheet=ws.title)
+
+
+def _merged_header_covered(ws, row: int, col: int) -> bool:
+    for merged in ws.merged_cells.ranges:
+        if merged.min_row <= row <= merged.max_row and merged.min_col <= col <= merged.max_col:
+            return ws.cell(merged.min_row, merged.min_col).value not in (None, "")
+    return False
 
 
 def _header_info(ws) -> dict[str, Any] | None:

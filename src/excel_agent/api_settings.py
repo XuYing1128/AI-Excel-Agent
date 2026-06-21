@@ -24,6 +24,7 @@ class ApiSettings:
     timeout_seconds: int = DEFAULT_TIMEOUT_SECONDS
     use_for_intent: bool = True
     use_for_review: bool = True
+    use_for_generation: bool = True
 
     def __post_init__(self) -> None:
         self.base_url = str(self.base_url or "").strip().rstrip("/")
@@ -53,6 +54,7 @@ class ApiSettings:
             "timeout_seconds",
             "use_for_intent",
             "use_for_review",
+            "use_for_generation",
         }
         return cls(**{key: value for key, value in data.items() if key in allowed})
 

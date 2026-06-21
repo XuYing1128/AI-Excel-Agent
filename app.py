@@ -311,7 +311,15 @@ def apply_clarification() -> None:
     st.session_state.clarification_done = True
 
 
-def execute_generation(spec: TaskSpec) -> None:
+def execute_generation(
+    spec: TaskSpec,
+    progress_callback: Any | None = None,
+) -> None:
+    def progress(stage: str, message: str) -> None:
+        if progress_callback:
+            progress_callback(stage, message)
+
+    progress("prepare", "任务已接收，正在准备输入文件和生成目录……")
     spec.output_name = Path(str(spec.output_name or "自定义表格.xlsx")).name
     if not spec.output_name.lower().endswith(".xlsx"):
         spec.output_name = f"{spec.output_name}.xlsx"
@@ -319,6 +327,7 @@ def execute_generation(spec: TaskSpec) -> None:
     spec.options["task_id"] = task_paths.task_id
     try:
         if st.session_state.uploaded_files:
+            progress("input", "正在安全复制上传文件，原文件不会被覆盖……")
             staged_files = []
             for upload in st.session_state.uploaded_files:
                 saved = save_uploaded_bytes(upload["name"], upload["data"], task_paths)
@@ -326,12 +335,19 @@ def execute_generation(spec: TaskSpec) -> None:
             spec.input_files = staged_files
         save_task_spec(spec, task_paths.task_spec_file)
 
-        generation = generate_from_task_spec(spec, task_paths)
+        generation = generate_from_task_spec(
+            spec,
+            task_paths,
+            api_settings=st.session_state.api_settings,
+            progress=progress,
+        )
+        progress("validate", "正在执行确定性质量检查和需求一致性检查……")
         validation = validate_generated_workbook(task_paths.output_file, spec, task_paths)
         workbook_summary: dict[str, Any] = {}
         if task_paths.output_file.exists():
             workbook_summary = inspect_workbook(task_paths.output_file)
             workbook_summary["sheet_count"] = len(workbook_summary.get("sheets", []))
+        progress("review", "正在根据最终确认需求审查生成结果……")
         subjective = run_subjective_review(
             task_spec=spec,
             validation_summary={"status": validation.status, **validation.summary},
@@ -369,6 +385,7 @@ def execute_generation(spec: TaskSpec) -> None:
                 "revision_index": int(spec.options.get("revision_index", 1)),
             }
         )
+        progress("complete", "生成、检查和审查已完成。")
     except Exception as exc:
         append_run_log_event(
             task_paths,
@@ -395,6 +412,7 @@ def execute_generation(spec: TaskSpec) -> None:
             "reviews": [],
             "user_notice": "本次未完成审查。",
         }
+        progress("error", f"任务失败：{type(exc).__name__}: {exc}")
 
 
 def render_settings_page() -> None:
@@ -447,6 +465,11 @@ def render_settings_page() -> None:
                     "用于审查生成结果",
                     value=settings.use_for_review,
                 )
+                use_generation = st.checkbox(
+                    "由大模型调用本地工具生成表格",
+                    value=settings.use_for_generation,
+                    help="启用后，大模型会制定完整工作簿方案并调用本地 Excel 工具；失败时不会静默退回无关模板。",
+                )
                 save_clicked = st.form_submit_button(
                     "保存设置",
                     type="primary",
@@ -462,6 +485,7 @@ def render_settings_page() -> None:
                     timeout_seconds=timeout,
                     use_for_intent=use_intent,
                     use_for_review=use_review,
+                    use_for_generation=use_generation,
                 )
                 save_api_settings(updated)
                 st.session_state.api_settings = updated
@@ -480,6 +504,7 @@ def render_settings_page() -> None:
                     timeout_seconds=timeout,
                     use_for_intent=use_intent,
                     use_for_review=use_review,
+                    use_for_generation=use_generation,
                 )
                 if not candidate.configured:
                     st.warning("请先填写地址、密钥和模型名称，并启用接口。")
@@ -717,8 +742,16 @@ def render_confirmation(spec: TaskSpec) -> None:
         st.session_state.task_spec = spec
         confirm, modify = st.columns(2)
         if confirm.button("确认并生成", type="primary", width="stretch"):
-            with st.spinner("正在生成并检查表格……"):
-                execute_generation(spec)
+            status_box = st.status("任务已接收，准备开始……", expanded=True)
+
+            def show_progress(stage: str, message: str) -> None:
+                status_box.write(message)
+                if stage == "complete":
+                    status_box.update(label="表格已生成并检查完成", state="complete")
+                elif stage == "error":
+                    status_box.update(label="生成失败", state="error")
+
+            execute_generation(spec, show_progress)
             st.rerun()
         if modify.button("重新描述需求", width="stretch"):
             st.session_state.task_spec = None
@@ -868,8 +901,16 @@ def render_revision(spec: TaskSpec) -> None:
                 st.session_state.api_settings,
             )
             revised.output_name = output_name
-            with st.spinner("正在生成修改版并重新检查……"):
-                execute_generation(revised)
+            status_box = st.status("修改任务已接收，准备开始……", expanded=True)
+
+            def show_revision_progress(stage: str, message: str) -> None:
+                status_box.write(message)
+                if stage == "complete":
+                    status_box.update(label="修改版已生成并检查完成", state="complete")
+                elif stage == "error":
+                    status_box.update(label="修改失败", state="error")
+
+            execute_generation(revised, show_revision_progress)
             st.session_state.revision_request = ""
             st.session_state.revision_output_name = ""
             st.rerun()

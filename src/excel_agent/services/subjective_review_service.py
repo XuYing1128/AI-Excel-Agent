@@ -55,6 +55,10 @@ def run_subjective_review(
         system_prompt=(
             "你是表格交付的主观审查助手。你只能评价是否符合用户目标、说明是否清楚、"
             "是否有过度设计风险。不能评价客观正确性，不能输出代码，不能要求修改单元格。"
+            "必须以任务方案中的最终确认项为准：include_charts=true 表示用户明确要求图表，"
+            "不得说图表未要求或建议删除；include_summary=true 同理。"
+            "说明页或填写说明属于项目强制质量要求，不得仅因用户原始文字未提及就判定为多余。"
+            "审查时必须核对工作簿结构摘要中的 chart_count 是否满足 include_charts。"
             "只返回 JSON 对象，不要 Markdown。字段为：status、fit_to_user_goal、"
             "over_design_risk、concerns、suggestions。status 只能是 pass 或 warn；"
             "over_design_risk 只能是 low、medium、high。concerns 和 suggestions 必须是中文数组。"
@@ -83,7 +87,7 @@ def run_subjective_review(
 
     try:
         payload = parse_json_object(response.content)
-        review = _normalize_review(payload, settings.provider_name)
+        review = _normalize_review(payload, settings.provider_name, task_spec)
     except (ValueError, TypeError) as exc:
         result = _disabled_result(
             f"建议审查结果无法解析，不影响文件下载：{exc}",
@@ -211,7 +215,11 @@ def _compact_workbook_summary(summary: dict[str, Any]) -> dict[str, Any]:
     return {"sheet_count": summary.get("sheet_count", len(sheets)), "sheets": sheets}
 
 
-def _normalize_review(payload: dict[str, Any], provider_name: str) -> dict[str, Any]:
+def _normalize_review(
+    payload: dict[str, Any],
+    provider_name: str,
+    task_spec: TaskSpec | None = None,
+) -> dict[str, Any]:
     status = str(payload.get("status", "warn")).lower()
     if status not in {"pass", "warn"}:
         status = "warn"
@@ -223,13 +231,29 @@ def _normalize_review(payload: dict[str, Any], provider_name: str) -> dict[str, 
         risk = "medium"
     concerns = payload.get("concerns", [])
     suggestions = payload.get("suggestions", [])
+    concern_items = [str(item) for item in concerns] if isinstance(concerns, list) else []
+    suggestion_items = [str(item) for item in suggestions] if isinstance(suggestions, list) else []
+    if task_spec is not None:
+        concern_items = [
+            item
+            for item in concern_items
+            if not _contradicts_confirmed_options(item, task_spec)
+        ]
+        suggestion_items = [
+            item
+            for item in suggestion_items
+            if not _contradicts_confirmed_options(item, task_spec)
+        ]
+        if not concern_items and status == "warn":
+            status = "pass"
+            fit = "pass"
     return {
         "model": provider_name,
         "status": status,
         "fit_to_user_goal": fit,
         "over_design_risk": risk,
-        "concerns": [str(item) for item in concerns] if isinstance(concerns, list) else [],
-        "suggestions": [str(item) for item in suggestions] if isinstance(suggestions, list) else [],
+        "concerns": concern_items,
+        "suggestions": suggestion_items,
     }
 
 
@@ -239,3 +263,30 @@ def _revision_prompt_from_review(review: dict[str, Any]) -> str:
         *[f"采用建议：{item}" for item in review.get("suggestions", [])],
     ]
     return "\n".join(lines)
+
+
+def _contradicts_confirmed_options(text: str, task_spec: TaskSpec) -> bool:
+    lowered = str(text).lower()
+    if task_spec.include_charts and any(
+        word in lowered
+        for word in (
+            "图表未要求",
+            "未要求图表",
+            "未要求的图表",
+            "删除图表",
+            "移除图表",
+            "去掉图表",
+        )
+    ):
+        return True
+    if task_spec.include_summary and any(
+        word in lowered
+        for word in ("汇总页未要求", "删除汇总页", "移除汇总页", "去掉汇总页")
+    ):
+        return True
+    if any(
+        word in lowered
+        for word in ("删除说明工作表", "移除说明工作表", "说明工作表多余", "说明页多余")
+    ):
+        return True
+    return False

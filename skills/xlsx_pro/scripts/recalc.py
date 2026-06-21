@@ -5,20 +5,51 @@ import platform
 import shutil
 import subprocess
 import sys
+import tempfile
 from pathlib import Path
 
 
+def find_soffice() -> str | None:
+    discovered = shutil.which("soffice") or shutil.which("libreoffice")
+    if discovered:
+        return discovered
+    if platform.system().lower() != "windows":
+        return None
+    candidates = (
+        Path(r"C:\Program Files\LibreOffice\program\soffice.exe"),
+        Path(r"C:\Program Files (x86)\LibreOffice\program\soffice.exe"),
+    )
+    return str(next((item for item in candidates if item.exists()), "")) or None
+
+
 def recalc_with_libreoffice(path: Path) -> bool:
-    soffice = shutil.which("soffice") or shutil.which("libreoffice")
+    soffice = find_soffice()
     if not soffice:
         return False
-    subprocess.run(
-        [soffice, "--headless", "--convert-to", "xlsx", "--outdir", str(path.parent), str(path)],
-        check=True,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        text=True,
-    )
+    with tempfile.TemporaryDirectory(prefix="ai_excel_recalc_") as temporary:
+        output_dir = Path(temporary)
+        completed = subprocess.run(
+            [
+                soffice,
+                "--headless",
+                "--convert-to",
+                "xlsx",
+                "--outdir",
+                str(output_dir),
+                str(path.resolve()),
+            ],
+            check=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+        converted = output_dir / path.name
+        if not converted.exists() or converted.stat().st_size == 0:
+            detail = (completed.stdout or completed.stderr).strip()
+            raise RuntimeError(f"LibreOffice 未产生重算文件：{detail}")
+        local_temporary = path.with_name(f".{path.stem}.recalc{path.suffix}")
+        shutil.copy2(converted, local_temporary)
+        local_temporary.replace(path)
     return True
 
 
@@ -69,4 +100,3 @@ def main() -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
-

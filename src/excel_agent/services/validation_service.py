@@ -113,7 +113,21 @@ def _apply_task_fidelity_checks(
     output_file: str | Path,
     task_spec: TaskSpec,
 ) -> None:
-    plan = task_spec.options.get("content_plan", {})
+    agent_plan = task_spec.options.get("agent_blueprint")
+    content_plan = task_spec.options.get("content_plan", {})
+    if isinstance(agent_plan, dict) and agent_plan.get("columns"):
+        plan = {
+            "title": agent_plan.get("title"),
+            "columns": [
+                {"name": item.get("label")}
+                for item in agent_plan.get("columns", [])
+                if isinstance(item, dict)
+            ],
+            "expected_data_rows": len(agent_plan.get("records", [])),
+            "explicit_structure": True,
+        }
+    else:
+        plan = content_plan
     if not isinstance(plan, dict) or not plan.get("explicit_structure"):
         return
     try:

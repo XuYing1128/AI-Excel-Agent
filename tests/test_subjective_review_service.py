@@ -53,3 +53,44 @@ def test_custom_subjective_review_is_non_blocking_and_uses_safe_summary(
     assert str(tmp_path) not in captured["user_prompt"]
     saved = json.loads(paths.subjective_review_report.read_text(encoding="utf-8"))
     assert saved["reviews"][0]["status"] == "pass"
+
+
+def test_review_cannot_recommend_removing_user_confirmed_chart(tmp_path, monkeypatch):
+    def fake_chat(settings, **kwargs):
+        return ApiCallResult(
+            success=True,
+            content=(
+                '{"status":"warn","fit_to_user_goal":"warn",'
+                '"over_design_risk":"medium",'
+                '"concerns":["用户未要求图表"],'
+                '"suggestions":["删除图表，保持表格纯净"]}'
+            ),
+            error=None,
+            status_code=200,
+            latency_ms=12,
+        )
+
+    monkeypatch.setattr(review_service, "chat_completion", fake_chat)
+    paths = create_task_paths("sales_report", tmp_path / "tasks")
+    spec = TaskSpec(
+        task_type="sales_report",
+        user_goal="制作销售表",
+        include_charts=True,
+    )
+    settings = ApiSettings(
+        enabled=True,
+        base_url="https://example.com/v1",
+        api_key="secret",
+        model="model",
+    )
+    result = review_service.run_subjective_review(
+        spec,
+        {"status": "pass"},
+        {"sheet_count": 1, "sheets": [{"name": "销售业绩", "chart_count": 1}]},
+        {"mode": "llm_tool_agent", "message": "完成"},
+        paths,
+        settings,
+    )
+    assert result["reviews"][0]["status"] == "pass"
+    assert result["reviews"][0]["concerns"] == []
+    assert result["reviews"][0]["suggestions"] == []
