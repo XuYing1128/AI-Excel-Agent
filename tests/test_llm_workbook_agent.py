@@ -217,3 +217,29 @@ def test_blueprint_revision_replaces_duplicate_business_columns():
 
     assert [item["label"] for item in merged["columns"]] == ["类别", "预算金额"]
     assert merged["records"] == [{"category": "餐饮", "budget": 1000}]
+
+
+def test_uploaded_data_replaces_model_demo_records(tmp_path):
+    source = tmp_path / "data.csv"
+    source.write_text("姓名,成绩\n张三,95\n李四,88\n", encoding="utf-8-sig")
+    spec = TaskSpec(
+        task_type="generic_table",
+        user_goal="根据上传数据生成成绩表",
+        input_files=[str(source)],
+    )
+    blueprint = {
+        "title": "成绩表",
+        "sheet_name": "成绩",
+        "columns": [
+            {"key": "name", "label": "姓名", "type": "text"},
+            {"key": "score", "label": "成绩", "type": "number"},
+        ],
+        "records": [{"name": "模型示例", "score": 100}],
+    }
+
+    attached = agent._attach_input_records(blueprint, spec)
+
+    assert attached["records"] == [
+        {"name": "张三", "score": 95},
+        {"name": "李四", "score": 88},
+    ]

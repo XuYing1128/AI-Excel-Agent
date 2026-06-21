@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 from ..api_settings import ApiSettings
+from ..io_utils import read_table
 from ..rich_workbook_builder import (
     build_rich_workbook,
     inspect_rich_workbook,
@@ -68,6 +69,8 @@ def generate_with_llm_agent(
                     "important_rule": (
                         "最终确认项优先于最初文字。include_charts=true 表示用户明确要求图表，"
                         "不得在审查中视为过度设计或建议删除。"
+                        "若提供模板：reference 仅参考视觉；flexible 尽量沿用形式但需求优先；"
+                        "strict 必须与模板字段和顺序兼容。模板样例数据默认不得作为业务数据。"
                     ),
                 },
                 ensure_ascii=False,
@@ -296,6 +299,7 @@ def _execute_build_tool(
 ) -> dict[str, Any]:
     try:
         blueprint = normalize_blueprint(raw_blueprint)
+        blueprint = _attach_input_records(blueprint, task_spec)
         if task_spec.include_charts and not blueprint.get("charts"):
             return {
                 "built": False,
@@ -358,6 +362,8 @@ def _system_prompt() -> str:
         "收到工具返回的结构、公式、图表和校验结果后，逐项核对原需求；发现缺失就提交完整修订版 blueprint "
         "再次调用 build_workbook，全部满足后调用 complete_task。"
         "禁止用无关标准模板代替需求。禁止遗漏基础数据。所有计算列必须是 formula，不能硬编码计算结果。"
+        "若 confirmed_task_spec.options.input_data_profile 存在，只根据列名和行数设计结构，"
+        "records 可以留空；本地工具会读取真实文件并按列名填充，模型不得编造示例数据。"
         "多级表头使用 header_groups；区域小计使用 group_subtotals；总计使用 grand_total；"
         "排序使用 sort；条件格式使用 conditional_formats；图表使用 charts。"
         "group_subtotals 可使用 group_key、label_template、merge_label_keys、sum_keys、"
@@ -381,7 +387,91 @@ def _system_prompt() -> str:
 def _safe_task_spec(task_spec: TaskSpec) -> dict[str, Any]:
     data = task_spec.to_dict()
     data["input_files"] = [Path(item).name for item in task_spec.input_files]
+    data["template_files"] = [Path(item).name for item in task_spec.template_files]
+    options = dict(data.get("options") or {})
+    options.pop("prepared_template_file", None)
+    data["options"] = options
     return data
+
+
+def _attach_input_records(
+    blueprint: dict[str, Any],
+    task_spec: TaskSpec,
+) -> dict[str, Any]:
+    if not task_spec.input_files:
+        return blueprint
+    records = []
+    available_columns: list[str] = []
+    for input_path in task_spec.input_files:
+        frame = read_table(input_path)
+        if frame.empty:
+            continue
+        available_columns.extend(str(item) for item in frame.columns)
+        normalized_sources = {
+            _normalize_label(str(column)): str(column)
+            for column in frame.columns
+        }
+        mappings: dict[str, str] = {}
+        input_columns = [
+            item
+            for item in blueprint.get("columns", [])
+            if not item.get("formula")
+        ]
+        for column in input_columns:
+            candidates = (
+                _normalize_label(str(column.get("label", ""))),
+                _normalize_label(str(column.get("key", ""))),
+            )
+            source = next(
+                (
+                    normalized_sources[candidate]
+                    for candidate in candidates
+                    if candidate in normalized_sources
+                ),
+                None,
+            )
+            if source:
+                mappings[column["key"]] = source
+        if not mappings:
+            continue
+        for source_record in frame.to_dict("records"):
+            records.append(
+                {
+                    target: _json_safe_value(source_record.get(source))
+                    for target, source in mappings.items()
+                }
+            )
+    if not records:
+        raise ValueError(
+            "模型方案中的输入列与上传数据字段无法对应。"
+            f"上传字段：{'、'.join(dict.fromkeys(available_columns))}。"
+        )
+    updated = deepcopy(blueprint)
+    updated["records"] = records
+    return normalize_blueprint(updated)
+
+
+def _json_safe_value(value: Any) -> Any:
+    if value is None:
+        return ""
+    if hasattr(value, "to_pydatetime"):
+        return value.to_pydatetime().isoformat(sep=" ")
+    if hasattr(value, "isoformat") and not isinstance(value, (str, bytes)):
+        try:
+            return value.isoformat()
+        except (TypeError, ValueError):
+            pass
+    if hasattr(value, "item"):
+        try:
+            return value.item()
+        except (ValueError, TypeError):
+            pass
+    try:
+        if value != value:
+            return ""
+    except (TypeError, ValueError):
+        pass
+    return value
 
 
 def _progress(callback: ProgressCallback | None, stage: str, message: str) -> None:

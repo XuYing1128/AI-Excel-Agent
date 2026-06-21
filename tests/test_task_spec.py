@@ -10,6 +10,8 @@ def test_task_spec_draft_and_roundtrip(tmp_path):
         "根据订单数据做销售月报和图表",
         ["orders.csv"],
     )
+    draft.task_spec.template_files = ["template.xls"]
+    draft.task_spec.options["template_mode"] = "strict"
     assert draft.task_spec.task_type == "sales_report"
     assert draft.task_spec.include_charts is True
     assert len(draft.clarifying_questions) == 1

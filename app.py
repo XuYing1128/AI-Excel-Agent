@@ -64,6 +64,9 @@ STATE_DEFAULTS: dict[str, Any] = {
     "active_page": "workbench",
     "user_prompt": "",
     "uploaded_files": [],
+    "uploaded_data_files": [],
+    "uploaded_template_files": [],
+    "pasted_data_text": "",
     "classification_result": None,
     "clarifying_questions": [],
     "task_spec": None,
@@ -252,6 +255,17 @@ def reset_generated_result() -> None:
 def start_new_task() -> None:
     st.session_state.user_prompt = ""
     st.session_state.uploaded_files = []
+    st.session_state.uploaded_data_files = []
+    st.session_state.uploaded_template_files = []
+    st.session_state.pasted_data_text = ""
+    for widget_key in (
+        "data_file_uploader",
+        "template_file_uploader",
+        "pasted_data_text_input",
+        "template_mode_selector",
+        "use_template_data_checkbox",
+    ):
+        st.session_state.pop(widget_key, None)
     st.session_state.classification_result = None
     st.session_state.clarifying_questions = []
     st.session_state.task_spec = None
@@ -260,26 +274,59 @@ def start_new_task() -> None:
     reset_generated_result()
 
 
-def analyze_request(prompt: str, uploads: list[Any]) -> None:
-    if not prompt.strip() and not uploads:
+def analyze_request(
+    prompt: str,
+    data_uploads: list[Any],
+    template_uploads: list[Any],
+    pasted_data_text: str,
+    template_mode: str,
+    use_template_data: bool,
+) -> None:
+    if not prompt.strip() and not data_uploads and not pasted_data_text.strip():
         st.error("请先描述要制作的表格，或上传数据文件。")
         return
-    snapshots = [
+    data_snapshots = [
         {"name": item.name, "type": item.type, "data": item.getvalue()}
-        for item in uploads
+        for item in data_uploads
     ]
-    filenames = [item["name"] for item in snapshots]
-    draft = build_task_spec_draft(prompt, filenames)
+    template_snapshots = [
+        {"name": item.name, "type": item.type, "data": item.getvalue()}
+        for item in template_uploads
+    ]
+    effective_prompt = prompt.strip()
+    if pasted_data_text.strip():
+        effective_prompt = (
+            f"{effective_prompt}\n\n用户粘贴的数据如下：\n{pasted_data_text.strip()}"
+        ).strip()
+    filenames = [item["name"] for item in data_snapshots]
+    draft = build_task_spec_draft(effective_prompt, filenames)
+    draft.task_spec.template_files = [
+        item["name"] for item in template_snapshots
+    ]
+    draft.task_spec.preserve_template_style = bool(template_snapshots)
+    draft.task_spec.options.update(
+        {
+            "template_mode": template_mode if template_snapshots else "none",
+            "use_template_data": bool(use_template_data and template_snapshots),
+            "template_file_names": [
+                item["name"] for item in template_snapshots
+            ],
+            "pasted_data_text": bool(pasted_data_text.strip()),
+        }
+    )
     api_plan = enhance_task_spec_draft(
         draft,
-        user_prompt=prompt,
+        user_prompt=effective_prompt,
         input_file_names=filenames,
         settings=st.session_state.api_settings,
     )
-    local_result = classify_intent(prompt)
+    local_result = classify_intent(effective_prompt)
     spec = api_plan.draft.task_spec
     st.session_state.user_prompt = prompt
-    st.session_state.uploaded_files = snapshots
+    st.session_state.uploaded_files = data_snapshots
+    st.session_state.uploaded_data_files = data_snapshots
+    st.session_state.uploaded_template_files = template_snapshots
+    st.session_state.pasted_data_text = pasted_data_text
     st.session_state.classification_result = {
         "table_type": spec.task_type,
         "confidence": spec.confidence,
@@ -315,7 +362,9 @@ def apply_clarification() -> None:
             classification_alternatives=[],
         ),
         user_prompt=merged.user_goal,
-        input_file_names=[item["name"] for item in st.session_state.uploaded_files],
+        input_file_names=[
+            item["name"] for item in st.session_state.uploaded_data_files
+        ],
         settings=st.session_state.api_settings,
     )
     st.session_state.task_spec = refined.draft.task_spec
@@ -338,13 +387,30 @@ def execute_generation(
     task_paths = create_task_paths(spec.task_type, output_name=spec.output_name)
     spec.options["task_id"] = task_paths.task_id
     try:
-        if st.session_state.uploaded_files:
+        if st.session_state.uploaded_data_files:
             progress("input", "正在安全复制上传文件，原文件不会被覆盖……")
             staged_files = []
-            for upload in st.session_state.uploaded_files:
-                saved = save_uploaded_bytes(upload["name"], upload["data"], task_paths)
+            for upload in st.session_state.uploaded_data_files:
+                saved = save_uploaded_bytes(
+                    upload["name"],
+                    upload["data"],
+                    task_paths,
+                    subdirectory="data",
+                )
                 staged_files.append(str(saved))
             spec.input_files = staged_files
+        if st.session_state.uploaded_template_files:
+            progress("input", "正在复制模板文件；模板中的示例数据默认不会作为业务数据……")
+            staged_templates = []
+            for upload in st.session_state.uploaded_template_files:
+                saved = save_uploaded_bytes(
+                    upload["name"],
+                    upload["data"],
+                    task_paths,
+                    subdirectory="templates",
+                )
+                staged_templates.append(str(saved))
+            spec.template_files = staged_templates
         save_task_spec(spec, task_paths.task_spec_file)
 
         generation_service = load_generation_service()
@@ -697,6 +763,23 @@ def render_plan(spec: TaskSpec) -> None:
             + "<br>".join(html.escape(item) for item in spec.assumptions)
             + "</div>",
             unsafe_allow_html=True,
+        )
+    if spec.template_files:
+        mode_labels = {
+            "reference": "仅参考样式与布局",
+            "flexible": "灵活套用，需求优先",
+            "strict": "严格遵守模板结构",
+        }
+        mode = str(spec.options.get("template_mode") or "reference")
+        data_policy = (
+            "保留模板中的数据"
+            if spec.options.get("use_template_data")
+            else "忽略模板中的示例数据"
+        )
+        st.markdown("**模板使用方式**")
+        st.write(
+            f"{mode_labels.get(mode, mode)}；{data_policy}；"
+            f"模板：{'、'.join(Path(item).name for item in spec.template_files)}"
         )
 
 
@@ -1126,15 +1209,65 @@ def render_workbench() -> None:
             height=160,
             label_visibility="collapsed",
         )
-        uploads = st.file_uploader(
-            "上传数据",
-            type=["csv", "xlsx", "xlsm"],
+        st.markdown("**数据来源**")
+        st.caption("数据用于生成内容；支持旧版 XLS、Excel、CSV、TSV 和文本文件。")
+        data_uploads = st.file_uploader(
+            "上传数据文件",
+            type=["csv", "tsv", "txt", "xls", "xlsx", "xlsm"],
             accept_multiple_files=True,
-            help="支持 CSV、XLSX、XLSM。",
+            help="这里上传真实业务数据，不要把只用于参考格式的模板放在这里。",
+            key="data_file_uploader",
+        )
+        pasted_data_text = st.text_area(
+            "或粘贴文本数据",
+            value=st.session_state.pasted_data_text,
+            placeholder=(
+                "可直接粘贴名单、制表符数据、CSV 内容或逐行文本。"
+                "请尽量保留表头，并在需求中说明各列含义。"
+            ),
+            height=110,
+            key="pasted_data_text_input",
+        )
+
+        st.markdown("**模板文件（可选）**")
+        st.caption("模板只决定格式和结构；默认不把模板里的示例数据带入结果。")
+        template_uploads = st.file_uploader(
+            "上传模板文件",
+            type=["xls", "xlsx", "xlsm"],
+            accept_multiple_files=False,
+            help="这里上传参考格式、固定导入格式或必须遵守的工作簿模板。",
+            key="template_file_uploader",
+        )
+        template_mode_labels = {
+            "reference": "仅作参考：参考配色、字体和大致布局，需求可以重新设计结构",
+            "flexible": "灵活套用：尽量保留模板形式，冲突时以本次需求为准",
+            "strict": "严格遵守：保持字段顺序和工作表结构，冲突时停止并提示",
+        }
+        template_mode = st.radio(
+            "模板约束方式",
+            list(template_mode_labels),
+            format_func=lambda value: template_mode_labels[value],
+            index=1,
+            disabled=template_uploads is None,
+            key="template_mode_selector",
+        )
+        use_template_data = st.checkbox(
+            "同时使用模板中已有的数据",
+            value=False,
+            disabled=template_uploads is None,
+            help="通常不要勾选。模板中的内容一般只是填写示例，默认会被忽略。",
+            key="use_template_data_checkbox",
         )
         if st.button("检查并完善需求", type="primary", width="stretch"):
             with st.spinner("正在逐项检查数据、字段、计算、汇总和图表要求……"):
-                analyze_request(prompt, list(uploads or []))
+                analyze_request(
+                    prompt,
+                    list(data_uploads or []),
+                    [template_uploads] if template_uploads else [],
+                    pasted_data_text,
+                    template_mode,
+                    use_template_data,
+                )
             st.rerun()
 
     spec = st.session_state.task_spec

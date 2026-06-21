@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import ast
 import re
 from copy import deepcopy
 from pathlib import Path
@@ -70,6 +71,7 @@ def build_rich_workbook(
     _write_headers(ws, columns, plan.get("header_groups", []), column_map, header_top, header_bottom)
 
     body_rows: list[int] = []
+    body_records: list[dict[str, Any]] = []
     group_rows: dict[str, list[int]] = {}
     current_row = data_start
     group_config = plan.get("group_subtotals")
@@ -85,6 +87,7 @@ def build_rich_workbook(
         for record in group_records:
             _write_record_row(ws, current_row, columns, record, column_map, plan)
             body_rows.append(current_row)
+            body_records.append(record)
             group_data_rows.append(current_row)
             current_row += 1
         if group_value is not None and group_config:
@@ -131,7 +134,15 @@ def build_rich_workbook(
     if require_charts and not charts:
         charts = [_default_chart(columns)]
     for chart_spec in charts:
-        _add_chart(ws, chart_spec, column_map, data_start, body_rows)
+        _add_chart(
+            ws,
+            chart_spec,
+            column_map,
+            data_start,
+            body_rows,
+            body_records,
+            columns,
+        )
     if charts:
         chart_edge = get_column_letter(min(max_col + 14, 40))
         ws.print_area = f"A1:{chart_edge}{max(last_row, 20)}"
@@ -497,6 +508,8 @@ def _add_chart(
     column_map: dict[str, int],
     data_start: int,
     body_rows: list[int],
+    body_records: list[dict[str, Any]],
+    columns: list[dict[str, Any]],
 ) -> None:
     if not body_rows:
         return
@@ -523,18 +536,20 @@ def _add_chart(
     helper.cell(1, 1, ws.cell(data_start - 1, column_map[category_key]).value)
     for index, key in enumerate(value_keys, start=2):
         helper.cell(1, index, ws.cell(data_start - 1, column_map[key]).value)
-    for helper_row, source_row in enumerate(body_rows, start=2):
-        helper.cell(
-            helper_row,
-            1,
-            f"='{ws.title}'!{get_column_letter(column_map[category_key])}{source_row}",
-        )
+    for helper_row, (source_row, record) in enumerate(
+        zip(body_rows, body_records),
+        start=2,
+    ):
+        category_value = record.get(category_key)
+        if category_value in (None, ""):
+            category_value = ws.cell(source_row, column_map[category_key]).value
+        helper.cell(helper_row, 1, category_value)
         for index, key in enumerate(value_keys, start=2):
-            helper.cell(
-                helper_row,
-                index,
-                f"='{ws.title}'!{get_column_letter(column_map[key])}{source_row}",
-            )
+            value = _chart_record_value(record, key, columns)
+            if value is None:
+                raw = ws.cell(source_row, column_map[key]).value
+                value = raw if not (isinstance(raw, str) and raw.startswith("=")) else 0
+            helper.cell(helper_row, index, value)
     cats = Reference(helper, min_col=1, min_row=2, max_row=1 + len(body_rows))
     for index, _key in enumerate(value_keys, start=2):
         data = Reference(
@@ -567,6 +582,105 @@ def _chart_helper_sheet(wb):
     ws = wb.create_sheet(name)
     ws.sheet_state = "hidden"
     return ws
+
+
+def _chart_record_value(
+    record: dict[str, Any],
+    key: str,
+    columns: list[dict[str, Any]],
+    stack: set[str] | None = None,
+) -> float | int | str | None:
+    value = record.get(key)
+    if value not in (None, ""):
+        number = _to_number(value)
+        return number if number != 0 or str(value).strip() in {"0", "0.0"} else value
+    column = next((item for item in columns if item["key"] == key), None)
+    if not column or not column.get("formula"):
+        return None
+    active = set(stack or ())
+    if key in active:
+        return None
+    active.add(key)
+    formula = str(column["formula"]).strip().lstrip("=")
+    values: dict[str, float] = {}
+    for source_key in re.findall(r"\{([A-Za-z_][A-Za-z0-9_]*)\}", formula):
+        resolved = _chart_record_value(record, source_key, columns, active)
+        if not isinstance(resolved, (int, float)):
+            return None
+        values[source_key] = float(resolved)
+    expression = formula
+    for source_key, resolved in values.items():
+        expression = expression.replace(f"{{{source_key}}}", str(resolved))
+    return _evaluate_chart_expression(expression)
+
+
+def _evaluate_chart_expression(expression: str) -> float | int | None:
+    text = expression.strip()
+    upper = text.upper()
+    if upper.startswith("IFERROR(") and text.endswith(")"):
+        arguments = _split_formula_arguments(text[8:-1])
+        return _evaluate_chart_expression(arguments[0]) if arguments else None
+    if upper.startswith("ROUND(") and text.endswith(")"):
+        arguments = _split_formula_arguments(text[6:-1])
+        if not arguments:
+            return None
+        value = _evaluate_chart_expression(arguments[0])
+        digits = int(float(arguments[1])) if len(arguments) > 1 else 0
+        return round(float(value), digits) if value is not None else None
+    if upper.startswith(("SUM(", "AVERAGE(")) and text.endswith(")"):
+        function = upper.split("(", 1)[0]
+        values = [
+            _evaluate_chart_expression(item)
+            for item in _split_formula_arguments(text[text.index("(") + 1 : -1])
+        ]
+        numeric = [float(item) for item in values if item is not None]
+        if not numeric:
+            return None
+        result = sum(numeric)
+        return result / len(numeric) if function == "AVERAGE" else result
+    try:
+        tree = ast.parse(text, mode="eval")
+        return _eval_numeric_ast(tree.body)
+    except (SyntaxError, TypeError, ValueError, ZeroDivisionError):
+        return None
+
+
+def _eval_numeric_ast(node: ast.AST) -> float:
+    if isinstance(node, ast.Constant) and isinstance(node.value, (int, float)):
+        return float(node.value)
+    if isinstance(node, ast.UnaryOp) and isinstance(node.op, (ast.UAdd, ast.USub)):
+        value = _eval_numeric_ast(node.operand)
+        return value if isinstance(node.op, ast.UAdd) else -value
+    if isinstance(node, ast.BinOp) and isinstance(
+        node.op,
+        (ast.Add, ast.Sub, ast.Mult, ast.Div),
+    ):
+        left = _eval_numeric_ast(node.left)
+        right = _eval_numeric_ast(node.right)
+        if isinstance(node.op, ast.Add):
+            return left + right
+        if isinstance(node.op, ast.Sub):
+            return left - right
+        if isinstance(node.op, ast.Mult):
+            return left * right
+        return left / right
+    raise ValueError("unsupported chart expression")
+
+
+def _split_formula_arguments(value: str) -> list[str]:
+    result: list[str] = []
+    depth = 0
+    start = 0
+    for index, char in enumerate(value):
+        if char == "(":
+            depth += 1
+        elif char == ")":
+            depth -= 1
+        elif char == "," and depth == 0:
+            result.append(value[start:index].strip())
+            start = index + 1
+    result.append(value[start:].strip())
+    return [item for item in result if item]
 
 
 def _sort_records(

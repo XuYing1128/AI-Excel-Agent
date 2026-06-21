@@ -10,8 +10,14 @@ from openpyxl import load_workbook
 
 from ..api_settings import ApiSettings
 from ..custom_workbook_builder import build_custom_workbook, build_dataset_workbook
+from ..io_utils import read_table
 from ..task_paths import TaskPaths, append_run_log_event, stage_input_files
 from ..task_spec import TaskSpec, save_task_spec
+from ..template_adapter import (
+    apply_template_mode,
+    inspect_template,
+    prepare_template_file,
+)
 from ..workbook_builder import analyze_sales_file, create_workbook
 from .llm_workbook_agent import generate_with_llm_agent
 
@@ -59,6 +65,42 @@ def generate_from_task_spec(
         save_task_spec(task_spec, task_paths.task_spec_file)
         if task_spec.input_files:
             task_spec.input_files = stage_input_files(task_spec.input_files, task_paths)
+        if task_spec.template_files:
+            task_spec.template_files = stage_input_files(
+                task_spec.template_files,
+                task_paths,
+            )
+            prepared_template = prepare_template_file(
+                task_spec.template_files[0],
+                task_paths.task_dir,
+            )
+            task_spec.options["prepared_template_file"] = str(prepared_template)
+            task_spec.options["template_summary"] = inspect_template(prepared_template)
+            if task_spec.options.get("use_template_data"):
+                task_spec.input_files.append(str(prepared_template))
+                task_spec.options["template_data_added_to_inputs"] = True
+        if task_spec.input_files:
+            profiles = []
+            total_rows = 0
+            all_columns: list[str] = []
+            for source_path in task_spec.input_files:
+                source_frame = read_table(source_path)
+                columns = [str(item) for item in source_frame.columns]
+                profiles.append(
+                    {
+                        "file_name": Path(source_path).name,
+                        "row_count": int(len(source_frame)),
+                        "columns": columns,
+                    }
+                )
+                total_rows += int(len(source_frame))
+                all_columns.extend(columns)
+            task_spec.options["input_data_profile"] = {
+                "files": profiles,
+                "row_count": total_rows,
+                "columns": list(dict.fromkeys(all_columns)),
+                "values_sent_to_model": False,
+            }
         save_task_spec(task_spec, task_paths.task_spec_file)
 
         settings = api_settings or ApiSettings()
@@ -71,6 +113,7 @@ def generate_from_task_spec(
             )
             if not agent.success:
                 raise RuntimeError(agent.error or agent.message)
+            template_notices = _apply_selected_template(task_spec, task_paths)
             save_task_spec(task_spec, task_paths.task_spec_file)
             result = GenerationResult(
                 success=True,
@@ -79,7 +122,7 @@ def generate_from_task_spec(
                 error=None,
                 used_command="excel_agent.services.llm_workbook_agent.generate_with_llm_agent",
                 mode="llm_tool_agent",
-                notices=agent.notices,
+                notices=[*agent.notices, *template_notices],
                 agent_tool_calls=agent.tool_calls,
                 agent_rounds=agent.rounds,
                 blueprint_file=agent.blueprint_file,
@@ -132,6 +175,7 @@ def generate_from_task_spec(
                 notices.append("未提供销售输入文件，已生成销售报表标准模板示例。")
 
         notices.extend(_apply_task_options(task_paths.output_file, task_spec))
+        notices.extend(_apply_selected_template(task_spec, task_paths))
         if not task_paths.output_file.exists():
             raise FileNotFoundError(f"生成内核未产生预期文件: {task_paths.output_file}")
 
@@ -209,3 +253,31 @@ def _apply_task_options(output_file: Path, task_spec: TaskSpec) -> list[str]:
     if changed:
         wb.save(output_file)
     return notices
+
+
+def _apply_selected_template(
+    task_spec: TaskSpec,
+    task_paths: TaskPaths,
+) -> list[str]:
+    template_path = str(task_spec.options.get("prepared_template_file") or "")
+    if not template_path:
+        return []
+    mode = str(task_spec.options.get("template_mode") or "reference")
+    apply_template_mode(
+        task_paths.output_file,
+        template_path,
+        mode=mode,
+        blueprint=task_spec.options.get("agent_blueprint"),
+        use_template_data=bool(task_spec.options.get("use_template_data")),
+    )
+    labels = {
+        "reference": "已参考模板的字体、表头样式、列宽和页面设置。",
+        "flexible": "已灵活套用模板形式；与本次需求冲突的内容以需求为准。",
+        "strict": "已按严格模板模式写入；模板字段顺序和工作表结构保持不变。",
+    }
+    notice = labels.get(mode, labels["reference"])
+    if not task_spec.options.get("use_template_data"):
+        notice += " 模板中的示例数据未带入结果。"
+    else:
+        notice += " 模板中的现有数据已作为额外数据源。"
+    return [notice]

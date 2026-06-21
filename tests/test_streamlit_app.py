@@ -12,6 +12,9 @@ def test_streamlit_app_initial_page_loads():
     assert any("本地表格助手" in item.value for item in app.markdown)
     assert any(button.label == "检查并完善需求" for button in app.button)
     assert any(button.label == "接口设置" for button in app.button)
+    assert any(uploader.label == "上传数据文件" for uploader in app.file_uploader)
+    assert any(uploader.label == "上传模板文件" for uploader in app.file_uploader)
+    assert any(item.label == "模板约束方式" for item in app.radio)
     assert not any("无需账号" in item.value for item in app.markdown)
 
 

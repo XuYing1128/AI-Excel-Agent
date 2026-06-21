@@ -115,6 +115,10 @@ def test_rich_builder_supports_multilevel_headers_subtotals_sort_and_chart(tmp_p
     assert len(ws._charts) == 1
     assert sum(len(item.rules) for item in ws.conditional_formatting) == 3
     assert ws.freeze_panes == "A5"
+    helper = wb["_图表数据"]
+    assert helper["A2"].value == "王五"
+    assert helper["B2"].value == 365000
+    assert not str(helper["B2"].value).startswith("=")
 
     inspection = inspect_rich_workbook(path)
     assert inspection["sheets"][0]["chart_count"] == 1

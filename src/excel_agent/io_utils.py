@@ -5,6 +5,8 @@ from __future__ import annotations
 import json
 import re
 import shutil
+import subprocess
+import tempfile
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -47,12 +49,119 @@ def read_table(path: str | Path, sheet_name: str | int | None = 0) -> pd.DataFra
         raise FileNotFoundError(source)
     suffix = source.suffix.lower()
     if suffix in {".csv", ".txt"}:
-        return pd.read_csv(source)
+        return _read_delimited_text(source)
     if suffix in {".tsv"}:
         return pd.read_csv(source, sep="\t")
-    if suffix in {".xlsx", ".xlsm", ".xls"}:
-        return pd.read_excel(source, sheet_name=sheet_name)
+    if suffix in {".xlsx", ".xlsm"}:
+        raw = pd.read_excel(
+            source,
+            sheet_name=sheet_name,
+            engine="openpyxl",
+            header=None,
+        )
+        return _promote_detected_header(raw)
+    if suffix == ".xls":
+        try:
+            raw = pd.read_excel(
+                source,
+                sheet_name=sheet_name,
+                engine="xlrd",
+                header=None,
+            )
+            return _promote_detected_header(raw)
+        except ImportError as exc:
+            raise RuntimeError(
+                "读取 .xls 需要 xlrd。请重新运行 install.bat 安装最新依赖。"
+            ) from exc
     raise ValueError(f"Unsupported table file: {source}")
+
+
+def convert_legacy_xls(path: str | Path, output_dir: str | Path) -> Path:
+    """Convert a legacy .xls workbook to .xlsx for template-preserving operations."""
+
+    source = Path(path).resolve()
+    if source.suffix.lower() != ".xls":
+        return source
+    destination_dir = Path(output_dir).resolve()
+    destination_dir.mkdir(parents=True, exist_ok=True)
+    soffice = _find_soffice()
+    if not soffice:
+        raise RuntimeError(
+            "当前系统可以读取 .xls 数据，但要把 .xls 作为模板使用，需要安装 LibreOffice。"
+        )
+    with tempfile.TemporaryDirectory(prefix="ai_excel_xls_") as temporary:
+        completed = subprocess.run(
+            [
+                soffice,
+                "--headless",
+                "--convert-to",
+                "xlsx",
+                "--outdir",
+                temporary,
+                str(source),
+            ],
+            check=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+        converted = Path(temporary) / f"{source.stem}.xlsx"
+        if not converted.exists():
+            detail = (completed.stdout or completed.stderr).strip()
+            raise RuntimeError(f".xls 转换失败：{detail}")
+        target = destination_dir / converted.name
+        shutil.copy2(converted, target)
+        return target
+
+
+def _read_delimited_text(source: Path) -> pd.DataFrame:
+    last_error: Exception | None = None
+    for encoding in ("utf-8-sig", "utf-8", "gb18030"):
+        try:
+            return pd.read_csv(
+                source,
+                sep=None,
+                engine="python",
+                encoding=encoding,
+            )
+        except (UnicodeDecodeError, pd.errors.ParserError, ValueError) as exc:
+            last_error = exc
+    raise ValueError(f"无法识别文本数据的编码或分隔符：{source.name}；{last_error}")
+
+
+def _promote_detected_header(raw: pd.DataFrame) -> pd.DataFrame:
+    if raw.empty:
+        return raw
+    scan = raw.head(40)
+    candidates: list[tuple[int, int]] = []
+    for index, row in scan.iterrows():
+        values = [value for value in row.tolist() if not pd.isna(value) and str(value).strip()]
+        if len(values) >= 2:
+            candidates.append((len(values), int(index)))
+    header_index = min(
+        (index for count, index in candidates if count == max(item[0] for item in candidates)),
+        default=0,
+    ) if candidates else 0
+    headers = []
+    seen: dict[str, int] = {}
+    for position, value in enumerate(raw.iloc[header_index].tolist(), start=1):
+        name = str(value).strip() if not pd.isna(value) and str(value).strip() else f"Column_{position}"
+        seen[name] = seen.get(name, 0) + 1
+        headers.append(name if seen[name] == 1 else f"{name}_{seen[name]}")
+    result = raw.iloc[header_index + 1 :].copy()
+    result.columns = headers
+    return result.dropna(how="all").dropna(axis=1, how="all").reset_index(drop=True)
+
+
+def _find_soffice() -> str | None:
+    discovered = shutil.which("soffice") or shutil.which("libreoffice")
+    if discovered:
+        return discovered
+    candidates = (
+        Path(r"C:\Program Files\LibreOffice\program\soffice.exe"),
+        Path(r"C:\Program Files (x86)\LibreOffice\program\soffice.exe"),
+    )
+    return str(next((item for item in candidates if item.exists()), "")) or None
 
 
 def save_json(data: dict[str, Any], path: str | Path) -> Path:
@@ -64,4 +173,3 @@ def save_json(data: dict[str, Any], path: str | Path) -> Path:
 def normalize_output_extension(path: str | Path, suffix: str = ".xlsx") -> Path:
     p = Path(path)
     return p if p.suffix else p.with_suffix(suffix)
-

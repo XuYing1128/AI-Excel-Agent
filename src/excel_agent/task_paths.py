@@ -143,7 +143,7 @@ def stage_input_files(paths: Iterable[str | Path], task_paths: TaskPaths) -> lis
         if not source.exists() or not source.is_file():
             raise FileNotFoundError(f"输入文件不存在: {source}")
         resolved = source.resolve()
-        if resolved.parent == input_root:
+        if resolved == input_root or resolved.is_relative_to(input_root):
             staged.append(str(resolved))
             continue
         destination = unique_destination(task_paths.input_dir, source.name)
@@ -152,8 +152,18 @@ def stage_input_files(paths: Iterable[str | Path], task_paths: TaskPaths) -> lis
     return staged
 
 
-def save_uploaded_bytes(filename: str, data: bytes, task_paths: TaskPaths) -> Path:
-    destination = unique_destination(task_paths.input_dir, filename)
+def save_uploaded_bytes(
+    filename: str,
+    data: bytes,
+    task_paths: TaskPaths,
+    subdirectory: str | None = None,
+) -> Path:
+    directory = task_paths.input_dir
+    if subdirectory:
+        safe_subdirectory = sanitize_filename(subdirectory, fallback="files")
+        directory = task_paths.input_dir / safe_subdirectory
+        directory.mkdir(parents=True, exist_ok=True)
+    destination = unique_destination(directory, filename)
     destination.write_bytes(data)
     return destination.resolve()
 
