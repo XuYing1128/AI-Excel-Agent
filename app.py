@@ -858,9 +858,9 @@ def render_settings_page() -> None:
                         key=f"role_select_{role}",
                     )
                 agent_enabled = st.checkbox(
-                    "启用智能体编排",
+                    "启用自动多步生成",
                     value=model_settings.agent_enabled,
-                    help="开启后，长尾需求会由多步流程选择本地工具生成；明确模板填充任务仍走快路径。",
+                    help="开启后，复杂需求会自动分步分析并选择本地表格工具生成；明确模板填充任务仍走快路径。",
                 )
                 run_python_enabled = st.checkbox(
                     "允许安全脚本工具",

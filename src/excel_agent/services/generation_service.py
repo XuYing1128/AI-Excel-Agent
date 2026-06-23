@@ -237,7 +237,7 @@ def _generate_with_model(
             )
             return result
         notices.append(
-            "多步智能体未能完成本次任务，已自动切换到兼容生成路径。"
+            "自动多步生成未能完成本次任务，已自动切换到兼容生成路径。"
             f"（反馈：{(agent_result.error or '未知原因')[:120]}）"
         )
 

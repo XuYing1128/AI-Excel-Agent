@@ -53,8 +53,8 @@ def run_agent(
         return AgentResult(
             success=False,
             output_file=None,
-            message="智能体编排未启用。",
-            error="智能体编排未启用。",
+            message="自动多步生成未启用。",
+            error="自动多步生成未启用。",
             steps=0,
             tool_calls=0,
         )
@@ -69,7 +69,7 @@ def run_agent(
             tool_calls=0,
         )
 
-    _progress(progress, "model", "正在由智能体分析任务并选择本地工具……")
+    _progress(progress, "model", "正在分析任务并选择合适的本地工具……")
     blueprint_path = task_paths.task_dir / "agent_workbook_blueprint.json"
     tool_context = ToolContext(
         task_spec=task_spec,
@@ -114,7 +114,7 @@ def run_agent(
     stalled = 0
 
     for step in range(1, max_steps + 1):
-        _progress(progress, "model", f"智能体第 {step} 步正在判断下一步操作……")
+        _progress(progress, "model", f"第 {step} 步：正在判断下一步操作……")
         response = model_registry.chat_with_tools(
             "builder",
             settings=settings,
@@ -198,12 +198,12 @@ def run_agent(
             result = AgentResult(
                 success=True,
                 output_file=str(task_paths.output_file),
-                message="智能体已调用本地工具生成工作簿。",
+                message="已通过本地工具生成工作簿。",
                 error=None,
                 steps=step,
                 tool_calls=tool_calls,
                 blueprint_file=str(blueprint_path) if blueprint_path.exists() else None,
-                notices=["已由智能体选择本地工具生成；文件仍经过确定性校验。"],
+                notices=["已自动选择本地工具生成；文件仍经过确定性校验。"],
             )
             append_run_log_event(
                 task_paths,
@@ -216,8 +216,8 @@ def run_agent(
     result = AgentResult(
         success=False,
         output_file=None,
-        message="智能体未能生成可用文件。",
-        error=last_error or "智能体未完成 finish_task。",
+        message="自动多步生成未能生成可用文件。",
+        error=last_error or "自动多步生成未完成。",
         steps=locals().get("step", 0),
         tool_calls=tool_calls,
         blueprint_file=str(blueprint_path) if blueprint_path.exists() else None,
