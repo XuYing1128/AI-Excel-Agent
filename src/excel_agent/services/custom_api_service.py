@@ -12,8 +12,19 @@ import requests
 
 from ..api_settings import ApiSettings
 
+try:
+    from json_repair import repair_json
+except ImportError:  # pragma: no cover - dependency is declared for normal installs
+    repair_json = None
+
 
 JSON_BLOCK_RE = re.compile(r"\{.*\}", re.DOTALL)
+
+
+TRUNCATION_HINT = (
+    "模型输出被截断：思考占满了输出长度，没能产出完整内容。"
+    "请在接口设置中调大“等待时间”，或改用响应更快的非推理模型（例如 deepseek-chat）。"
+)
 
 
 @dataclass
@@ -23,6 +34,7 @@ class ApiCallResult:
     error: str | None
     status_code: int | None
     latency_ms: int | None
+    finish_reason: str | None = None
 
 
 @dataclass
@@ -50,6 +62,7 @@ def chat_completion(
     user_prompt: str,
     temperature: float = 0.1,
     max_tokens: int = 800,
+    json_mode: bool = False,
 ) -> ApiCallResult:
     if not settings.configured:
         return ApiCallResult(False, "", "接口配置不完整。", None, None)
@@ -65,6 +78,8 @@ def chat_completion(
         "max_tokens": max_tokens,
         "stream": False,
     }
+    if json_mode:
+        payload["response_format"] = {"type": "json_object"}
     headers = {
         "Authorization": f"Bearer {settings.api_key}",
         "Content-Type": "application/json",
@@ -81,6 +96,18 @@ def chat_completion(
         return ApiCallResult(False, "", f"连接失败：{exc}", None, None)
 
     elapsed_ms = int(response.elapsed.total_seconds() * 1000)
+    if not response.ok and json_mode and response.status_code in {400, 404, 422}:
+        payload.pop("response_format", None)
+        try:
+            response = requests.post(
+                endpoint,
+                headers=headers,
+                json=payload,
+                timeout=settings.timeout_seconds,
+            )
+            elapsed_ms = int(response.elapsed.total_seconds() * 1000)
+        except requests.RequestException as exc:
+            return ApiCallResult(False, "", f"连接失败：{exc}", None, None)
     if not response.ok:
         detail = _response_error_message(response)
         return ApiCallResult(
@@ -93,7 +120,9 @@ def chat_completion(
 
     try:
         data = response.json()
-        content = data["choices"][0]["message"]["content"]
+        choice = data["choices"][0]
+        content = choice["message"].get("content")
+        finish_reason = choice.get("finish_reason")
     except (ValueError, KeyError, IndexError, TypeError) as exc:
         return ApiCallResult(
             False,
@@ -102,12 +131,18 @@ def chat_completion(
             response.status_code,
             elapsed_ms,
         )
+    text = str(content or "").strip()
+    if not text and finish_reason == "length":
+        return ApiCallResult(
+            False, "", TRUNCATION_HINT, response.status_code, elapsed_ms, finish_reason
+        )
     return ApiCallResult(
         True,
-        str(content).strip(),
+        text,
         None,
         response.status_code,
         elapsed_ms,
+        finish_reason,
     )
 
 
@@ -182,7 +217,11 @@ def chat_completion_with_tools(
                 function = raw.get("function") or {}
                 arguments = function.get("arguments") or "{}"
                 if isinstance(arguments, str):
-                    arguments = json.loads(arguments)
+                    arguments = (
+                        json.loads(arguments)
+                        if last_finish_reason == "length"
+                        else parse_json_object(arguments)
+                    )
                 if not isinstance(arguments, dict):
                     raise TypeError("tool arguments 不是 JSON 对象")
                 parsed_calls.append(
@@ -194,6 +233,16 @@ def chat_completion_with_tools(
                 )
         except (ValueError, KeyError, IndexError, TypeError, json.JSONDecodeError) as exc:
             last_parse_error = exc
+            if last_finish_reason == "length":
+                # Truncation (the model's reasoning ate the output budget). Give
+                # one quick retry in case it was transient, then fail fast so the
+                # caller switches to JSON mode / local generation instead of
+                # burning a third slow call (which just truncates again).
+                if attempt == 0:
+                    continue
+                return ToolChatResult(
+                    False, "", [], TRUNCATION_HINT, response.status_code, elapsed_ms, None
+                )
             if attempt < 2:
                 time.sleep(1.5 * (attempt + 1))
                 continue
@@ -209,6 +258,16 @@ def chat_completion_with_tools(
                         else ""
                     )
                 ),
+                response.status_code,
+                elapsed_ms,
+                None,
+            )
+        if not parsed_calls and not content.strip() and last_finish_reason == "length":
+            return ToolChatResult(
+                False,
+                "",
+                [],
+                TRUNCATION_HINT,
                 response.status_code,
                 elapsed_ms,
                 None,
@@ -258,12 +317,20 @@ def parse_json_object(content: str) -> dict[str, Any]:
         parsed = json.loads(text)
     except json.JSONDecodeError:
         match = JSON_BLOCK_RE.search(text)
-        if not match:
+        candidate = match.group(0) if match else text[text.find("{") :] if "{" in text else ""
+        if not candidate:
             raise ValueError("模型没有返回 JSON 对象。") from None
         try:
-            parsed = json.loads(match.group(0))
+            parsed = json.loads(candidate)
         except json.JSONDecodeError as exc:
-            raise ValueError(f"模型返回的 JSON 无法解析：{exc}") from exc
+            if repair_json is None:
+                raise ValueError(f"模型返回的 JSON 无法解析：{exc}") from exc
+            try:
+                parsed = repair_json(candidate, return_objects=True)
+            except Exception as repair_exc:
+                raise ValueError(
+                    f"模型返回的 JSON 无法解析，自动修复也失败：{repair_exc}"
+                ) from repair_exc
     if not isinstance(parsed, dict):
         raise ValueError("模型返回的 JSON 顶层不是对象。")
     return parsed

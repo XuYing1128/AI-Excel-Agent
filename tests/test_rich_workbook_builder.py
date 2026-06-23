@@ -160,3 +160,40 @@ def test_grand_total_default_merge_does_not_overlap_sum_columns(tmp_path):
     assert ws["C6"].value == "=SUM(C4:C5)"
     assert ws["D6"].value == "=SUM(D4:D5)"
     assert validate_workbook(path)["status"] == "pass"
+
+
+def test_rich_builder_supports_multi_sheet_cross_references(tmp_path):
+    blueprint = {
+        "title": "关联测算表",
+        "sheets": [
+            {
+                "sheet_name": "参数表",
+                "title": "参数表",
+                "columns": [
+                    {"key": "item", "label": "项目", "type": "text"},
+                    {"key": "value", "label": "参数值", "type": "percentage"},
+                ],
+                "records": [{"item": "调整比例", "value": 0.1}],
+            },
+            {
+                "sheet_name": "明细表",
+                "title": "员工明细表",
+                "columns": [
+                    {"key": "name", "label": "姓名", "type": "text"},
+                    {"key": "salary", "label": "当前薪资", "type": "money"},
+                    {
+                        "key": "adjusted",
+                        "label": "调整后薪资",
+                        "type": "money",
+                        "formula": "=IFERROR({salary}*(1+'参数表'!$B$4),0)",
+                    },
+                ],
+                "records": [{"name": "张三", "salary": 10000}],
+            },
+        ],
+    }
+    path = build_rich_workbook(blueprint, tmp_path / "multi.xlsx")
+    wb = load_workbook(path, data_only=False)
+    assert wb.sheetnames == ["参数表", "明细表"]
+    assert wb["明细表"]["C4"].value == "=IFERROR(B4*(1+'参数表'!$B$4),0)"
+    assert validate_workbook(path)["status"] == "pass"

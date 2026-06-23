@@ -114,6 +114,81 @@ def build_custom_workbook(
     return output_path
 
 
+def build_inline_tables_workbook(
+    plan: dict[str, Any],
+    output: str | Path,
+    *,
+    include_charts: bool = False,
+) -> Path:
+    """Preserve every table embedded in the request as a usable workbook.
+
+    This is the deterministic fallback for complex multi-table prompts. It is
+    deliberately preferable to selecting an unrelated business template when
+    a model response is unavailable.
+    """
+
+    tables = [
+        dict(item)
+        for item in plan.get("inline_tables", [])
+        if isinstance(item, dict) and item.get("columns")
+    ]
+    if not tables:
+        raise ValueError("需求中没有可生成的内嵌数据表。")
+    output_path = ensure_output_path(output, "需求内数据表.xlsx")
+    wb = Workbook()
+    wb.remove(wb.active)
+
+    instructions = wb.create_sheet("说明")
+    instructions["A1"] = str(plan.get("title") or "表格生成说明")
+    instructions["A3"] = "数据来源"
+    instructions["B3"] = "用户需求文字中识别出的结构化数据"
+    instructions["A4"] = "识别结果"
+    instructions["B4"] = f"共识别 {len(tables)} 个数据表，已分别保存为工作表。"
+    instructions["A5"] = "计算说明"
+    instructions["B5"] = (
+        "原始输入数据已完整保留；模型方案不可用时，不会擅自套用无关模板。"
+    )
+    instructions["A6"] = "复核提醒"
+    instructions["B6"] = "复杂计算、薪酬、绩效、财务结果需要人工复核。"
+    style_instruction_sheet(instructions)
+
+    used_names = {"说明"}
+    primary_name = str(plan.get("primary_table_name") or "")
+    for index, table in enumerate(tables, start=1):
+        requested_name = str(table.get("name") or f"数据表{index}")
+        sheet_name = _unique_sheet_name(requested_name, used_names)
+        used_names.add(sheet_name)
+        ws = wb.create_sheet(sheet_name)
+        title = (
+            str(plan.get("title") or requested_name)
+            if requested_name == primary_name
+            else requested_name
+        )
+        _write_inline_table_sheet(ws, table, title)
+
+    if include_charts:
+        primary_sheet = next(
+            (
+                wb[name]
+                for name in wb.sheetnames
+                if name != "说明" and primary_name and primary_name[:31] in name
+            ),
+            wb[wb.sheetnames[1]],
+        )
+        headers = [
+            {
+                "name": str(primary_sheet.cell(3, col).value or ""),
+                "kind": infer_column_kind(primary_sheet.cell(3, col).value or ""),
+                "role": "input",
+            }
+            for col in range(1, primary_sheet.max_column + 1)
+        ]
+        _add_custom_chart(primary_sheet, headers, 4, primary_sheet.max_row)
+
+    wb.save(output_path)
+    return output_path
+
+
 def build_dataset_workbook(
     input_path: str | Path,
     output: str | Path,
@@ -253,11 +328,19 @@ def _add_custom_chart(
     start_row: int,
     end_row: int,
 ) -> None:
+    if end_row < start_row:
+        return
     numeric = [
         index
         for index, item in enumerate(columns, start=1)
-        if item.get("kind") in {"number", "money", "percentage"}
+        if item.get("kind") in {"number", "money"} and item.get("role") != "formula"
     ]
+    if not numeric:
+        numeric = [
+            index
+            for index, item in enumerate(columns, start=1)
+            if item.get("kind") in {"number", "money", "percentage"}
+        ]
     category = next(
         (
             index
@@ -266,21 +349,27 @@ def _add_custom_chart(
         ),
         None,
     )
-    if not numeric or not category or end_row < start_row:
+    if not numeric or not category:
         return
-    chart = LineChart() if columns[category - 1].get("kind") == "date" else BarChart()
+    is_date = columns[category - 1].get("kind") == "date"
+    chart = LineChart() if is_date else BarChart()
+    if isinstance(chart, BarChart):
+        chart.type = "col"
+        chart.grouping = "clustered"
+        chart.overlap = -10
+        chart.gapWidth = 80
     chart.title = str(ws["A1"].value)
-    chart.height = 7
-    chart.width = 13
-    data = Reference(
-        ws,
-        min_col=numeric[0],
-        min_row=start_row - 1,
-        max_row=end_row,
-    )
+    chart.style = 10
+    chart.height = 7.5
+    chart.width = 15
     cats = Reference(ws, min_col=category, min_row=start_row, max_row=end_row)
-    chart.add_data(data, titles_from_data=True)
+    series_cols = numeric[:4]
+    for col in series_cols:
+        data = Reference(ws, min_col=col, min_row=start_row - 1, max_row=end_row)
+        chart.add_data(data, titles_from_data=True)
     chart.set_categories(cats)
+    if len(series_cols) == 1:
+        chart.legend = None
     ws.add_chart(chart, f"{get_column_letter(len(columns) + 2)}3")
 
 
@@ -352,6 +441,53 @@ def _write_dataframe_sheet(ws, df: pd.DataFrame, title: str) -> None:
         )
     set_reasonable_column_widths(ws)
     apply_print_settings(ws)
+
+
+def _write_inline_table_sheet(ws, table: dict[str, Any], title: str) -> None:
+    columns = [str(item) for item in table.get("columns", [])]
+    records = [dict(item) for item in table.get("records", []) if isinstance(item, dict)]
+    max_col = max(1, len(columns))
+    ws.merge_cells(start_row=1, start_column=1, end_row=1, end_column=max_col)
+    ws["A1"] = title
+    apply_title_style(ws, 1, 1, max_col)
+    for col, name in enumerate(columns, start=1):
+        ws.cell(3, col, name)
+    apply_header_style(ws, 3)
+    for row_index, record in enumerate(records, start=4):
+        for col_index, name in enumerate(columns, start=1):
+            ws.cell(row_index, col_index, record.get(name, ""))
+    if records:
+        freeze_and_filter(
+            ws,
+            "A4",
+            f"A3:{get_column_letter(max_col)}{3 + len(records)}",
+        )
+    for col_index, name in enumerate(columns, start=1):
+        kind = infer_column_kind(name)
+        number_format = {
+            "money": '#,##0.00;[Red]-#,##0.00',
+            "percentage": "0.00%",
+            "date": "yyyy-mm-dd",
+            "number": '#,##0.00;[Red]-#,##0.00',
+        }.get(kind)
+        if number_format:
+            for row_index in range(4, 4 + len(records)):
+                ws.cell(row_index, col_index).number_format = number_format
+    set_reasonable_column_widths(ws)
+    apply_print_settings(ws)
+
+
+def _unique_sheet_name(value: str, used: set[str]) -> str:
+    base = re.sub(r"[\[\]:*?/\\]", "_", str(value)).strip()[:31] or "数据"
+    if base not in used:
+        return base
+    counter = 2
+    while True:
+        suffix = f"_{counter}"
+        candidate = f"{base[:31 - len(suffix)]}{suffix}"
+        if candidate not in used:
+            return candidate
+        counter += 1
 
 
 def _write_dataset_summary(ws, df: pd.DataFrame, report: dict[str, Any]) -> None:

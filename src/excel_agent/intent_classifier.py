@@ -32,8 +32,24 @@ KEYWORDS: dict[str, list[str]] = {
     "ecommerce_analysis": ["电商", "订单", "gmv", "sku", "退款", "店铺", "转化", "ecommerce"],
     "project_plan": ["项目", "计划", "里程碑", "甘特", "gantt", "project", "milestone"],
     "schedule": ["课程表", "排班", "值班", "课表", "schedule", "shift", "timetable"],
-    "attendance": ["考勤", "签到", "出勤", "迟到", "attendance", "checkin"],
-    "finance_model": ["财务", "利润", "测算", "毛利", "成本", "roi", "pnl", "finance", "model"],
+    "attendance": ["考勤统计", "考勤表", "签到", "出勤率", "迟到", "缺勤", "attendance", "checkin"],
+    "finance_model": [
+        "财务",
+        "利润",
+        "测算",
+        "毛利",
+        "成本",
+        "薪酬调整",
+        "薪资调整",
+        "工资",
+        "奖金",
+        "绩效评估",
+        "加权总分",
+        "roi",
+        "pnl",
+        "finance",
+        "model",
+    ],
     "dashboard": ["仪表盘", "看板", "dashboard", "bi", "kpi", "经营分析"],
 }
 
@@ -72,16 +88,48 @@ def normalize_table_type(value: str | None) -> str:
 
 def classify_intent(text: str) -> IntentResult:
     lowered = text.lower()
-    scores: dict[str, list[str]] = {}
+    scores: dict[str, tuple[float, list[str]]] = {}
     for table_type, words in KEYWORDS.items():
         matched = [word for word in words if word.lower() in lowered]
         if matched:
-            scores[table_type] = matched
+            score = sum(_keyword_weight(word) for word in matched)
+            scores[table_type] = (score, matched)
     if not scores:
         return IntentResult("generic_table", 0.2, [])
-    table_type, matched = max(scores.items(), key=lambda item: (len(item[1]), len("".join(item[1]))))
-    confidence = min(0.95, 0.35 + len(matched) * 0.18)
+    table_type, (score, matched) = max(
+        scores.items(),
+        key=lambda item: (item[1][0], len(item[1][1]), len("".join(item[1][1]))),
+    )
+    confidence = min(0.95, 0.35 + score * 0.08)
     return IntentResult(table_type, confidence, matched)
+
+
+def ranked_intents(text: str) -> list[str]:
+    """Return table types ordered by weighted semantic evidence."""
+
+    lowered = str(text or "").lower()
+    scored: list[tuple[float, int, str]] = []
+    for table_type, words in KEYWORDS.items():
+        matched = [word for word in words if word.lower() in lowered]
+        if matched:
+            scored.append(
+                (
+                    sum(_keyword_weight(word) for word in matched),
+                    len("".join(matched)),
+                    table_type,
+                )
+            )
+    scored.sort(reverse=True)
+    return [table_type for _, _, table_type in scored]
+
+
+def _keyword_weight(word: str) -> float:
+    normalized = str(word).strip()
+    if len(normalized) >= 4:
+        return 3.0
+    if len(normalized) >= 2:
+        return 1.5
+    return 1.0
 
 
 def classify_intent_with_llm(text: str, llm_client: object | None = None) -> IntentResult:

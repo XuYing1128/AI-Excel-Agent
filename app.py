@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import html
 import json
+import time
 from copy import deepcopy
 from pathlib import Path
 from typing import Any
@@ -17,6 +18,7 @@ from excel_agent.api_settings import (
     mask_api_key,
     save_api_settings,
 )
+from excel_agent.chart_spec import CHART_TYPE_LABELS, chart_type_from_text
 from excel_agent.intent_classifier import SUPPORTED_TYPES, classify_intent
 from excel_agent.manifest import (
     append_manifest_record,
@@ -100,105 +102,124 @@ def inject_styles() -> None:
         """
         <style>
         :root {
-            --brand: #2563eb;
-            --brand-dark: #1d4ed8;
-            --ink: #172033;
-            --muted: #64748b;
-            --line: #e3e8f1;
-            --canvas: #f5f7fb;
+            --brand: #4f46e5;
+            --brand-dark: #4338ca;
+            --brand-soft: #eef2ff;
+            --accent: #6366f1;
+            --ink: #1e2333;
+            --muted: #6b7384;
+            --line: #e7eaf3;
+            --canvas: #f4f6fb;
+            --ok: #16a34a;
+            --warn: #d97706;
+            --bad: #dc2626;
         }
         html, body, [class*="css"] {
-            font-family: "Microsoft YaHei", "PingFang SC", "Noto Sans CJK SC", sans-serif;
+            font-family: "Microsoft YaHei", "PingFang SC", "Noto Sans CJK SC", -apple-system, sans-serif;
         }
-        .stApp { background: var(--canvas); color: var(--ink); }
-        .block-container {
-            max-width: 1180px;
-            padding-top: 1.4rem;
-            padding-bottom: 4rem;
+        .stApp {
+            background:
+                radial-gradient(1100px 480px at 12% -8%, #eef1ff 0%, rgba(238,241,255,0) 55%),
+                radial-gradient(900px 420px at 100% 0%, #eafff4 0%, rgba(234,255,244,0) 50%),
+                var(--canvas);
+            color: var(--ink);
         }
+        .block-container { max-width: 1140px; padding-top: 1.1rem; padding-bottom: 4rem; }
         header[data-testid="stHeader"],
-        [data-testid="stToolbar"],
-        [data-testid="stDecoration"],
+        [data-testid="stToolbar"], [data-testid="stDecoration"],
         [data-testid="stStatusWidget"],
-        #MainMenu, footer, [data-testid="stSidebar"] {
-            display: none !important;
-        }
+        #MainMenu, footer, [data-testid="stSidebar"] { display: none !important; }
+
+        /* Hero header */
         .page-head {
-            margin: 12px 0 24px;
-            padding: 26px 30px;
-            background: #fff;
-            border: 1px solid var(--line);
-            border-radius: 18px;
+            margin: 6px 0 22px;
+            padding: 30px 34px;
+            background: linear-gradient(120deg, #4f46e5 0%, #6366f1 45%, #7c83f5 100%);
+            border-radius: 22px;
+            box-shadow: 0 18px 40px -18px rgba(79,70,229,.55);
+            position: relative; overflow: hidden;
         }
-        .page-title {
-            font-size: 30px;
-            line-height: 1.3;
-            font-weight: 800;
-            color: #10203a;
-            margin-bottom: 7px;
+        .page-head::after {
+            content: ""; position: absolute; right: -40px; top: -60px;
+            width: 220px; height: 220px; border-radius: 50%;
+            background: rgba(255,255,255,.10);
         }
-        .page-subtitle {
-            color: var(--muted);
-            font-size: 15px;
-            line-height: 1.75;
+        .page-title { font-size: 28px; line-height: 1.25; font-weight: 800; color: #fff; margin-bottom: 8px; }
+        .page-subtitle { color: rgba(255,255,255,.86); font-size: 14.5px; line-height: 1.7; max-width: 760px; }
+
+        /* Step indicator */
+        .steps { display: flex; gap: 10px; flex-wrap: wrap; margin: 2px 0 18px; }
+        .step {
+            display: flex; align-items: center; gap: 8px;
+            padding: 7px 14px; border-radius: 999px; font-size: 13px; font-weight: 600;
+            background: #fff; color: var(--muted); border: 1px solid var(--line);
         }
+        .step .dot {
+            width: 20px; height: 20px; border-radius: 50%; display: grid; place-items: center;
+            font-size: 12px; background: #eef1f6; color: var(--muted); font-weight: 700;
+        }
+        .step.active { background: var(--brand); color: #fff; border-color: var(--brand);
+            box-shadow: 0 8px 18px -8px rgba(79,70,229,.6); }
+        .step.active .dot { background: rgba(255,255,255,.25); color: #fff; }
+        .step.done { color: var(--ok); border-color: #c7ecd3; background: #f2fcf5; }
+        .step.done .dot { background: var(--ok); color: #fff; }
+
+        /* Cards */
         div[data-testid="stVerticalBlockBorderWrapper"] {
-            background: #fff;
-            border: 1px solid var(--line);
-            border-radius: 16px;
-            box-shadow: 0 5px 18px rgba(30, 50, 90, .04);
+            background: #fff; border: 1px solid var(--line);
+            border-radius: 18px; box-shadow: 0 10px 30px -22px rgba(30,40,90,.35);
         }
-        h1, h2, h3 { color: var(--ink); letter-spacing: -.02em; }
-        h3 { font-size: 20px !important; }
+        h1, h2, h3 { color: var(--ink); letter-spacing: -.01em; }
+        h3 { font-size: 19px !important; font-weight: 750 !important; }
+
+        /* Buttons */
         .stButton > button, .stDownloadButton > button {
-            border-radius: 9px;
-            min-height: 42px;
-            font-weight: 700;
+            border-radius: 11px; min-height: 44px; font-weight: 700; transition: all .15s ease;
         }
-        .stButton > button[kind="primary"] {
-            background: var(--brand);
-            border-color: var(--brand);
+        .stButton > button[kind="primary"], .stDownloadButton > button {
+            background: linear-gradient(120deg, var(--brand) 0%, var(--accent) 100%);
+            border: none; color: #fff; box-shadow: 0 10px 22px -12px rgba(79,70,229,.7);
         }
-        .stButton > button[kind="primary"]:hover {
-            background: var(--brand-dark);
-            border-color: var(--brand-dark);
+        .stButton > button[kind="primary"]:hover, .stDownloadButton > button:hover {
+            transform: translateY(-1px); box-shadow: 0 14px 26px -12px rgba(79,70,229,.85);
         }
+        .stButton > button[kind="secondary"] {
+            background: #fff; border: 1px solid var(--line); color: var(--ink);
+        }
+        .stButton > button[kind="secondary"]:hover { border-color: var(--accent); color: var(--brand); }
+
+        /* Inputs */
         div[data-testid="stTextArea"] textarea,
-        div[data-testid="stTextInput"] input { border-radius: 9px; }
+        div[data-testid="stTextInput"] input {
+            border-radius: 11px !important; border: 1px solid var(--line) !important;
+        }
+        div[data-testid="stTextArea"] textarea:focus,
+        div[data-testid="stTextInput"] input:focus {
+            border-color: var(--accent) !important; box-shadow: 0 0 0 3px var(--brand-soft) !important;
+        }
         [data-testid="stFileUploaderDropzone"] {
-            background: #f8faff;
-            border: 1px dashed #b8c8e5;
-            border-radius: 11px;
+            background: #f8faff; border: 1.5px dashed #c3cdf0; border-radius: 14px;
         }
         [data-testid="stFileUploaderDropzoneInstructions"] { display: none; }
         [data-testid="stFileUploaderDropzone"] button > * { display: none !important; }
-        [data-testid="stFileUploaderDropzone"] button::after {
-            content: "选择本地文件";
-            font-size: 14px;
-        }
+        [data-testid="stFileUploaderDropzone"] button::after { content: "选择本地文件"; font-size: 14px; }
         [data-testid="stFileUploaderDropzone"] button { font-size: 0; }
-        div[data-testid="stAlert"] { border-radius: 11px; }
+        div[data-testid="stAlert"] { border-radius: 13px; }
+
+        /* Tabs as pills */
+        button[data-baseweb="tab"] { font-weight: 650; }
+        [data-baseweb="tab-list"] { gap: 4px; }
+
+        /* Plan cards */
         .plan-card {
-            border: 1px solid var(--line);
-            border-radius: 12px;
-            padding: 14px 16px;
-            background: #fbfcff;
-            min-height: 102px;
+            border: 1px solid var(--line); border-radius: 14px; padding: 15px 17px;
+            background: linear-gradient(180deg, #fbfcff 0%, #f7f9ff 100%); min-height: 100px;
         }
-        .plan-label { color: #718096; font-size: 12px; margin-bottom: 7px; }
-        .plan-value {
-            color: var(--ink);
-            font-size: 15px;
-            line-height: 1.55;
-            font-weight: 650;
-        }
+        .plan-label { color: var(--muted); font-size: 12px; margin-bottom: 7px; letter-spacing: .02em; }
+        .plan-value { color: var(--ink); font-size: 15px; line-height: 1.55; font-weight: 700; }
         .soft-note {
-            padding: 12px 14px;
-            background: #f8fafc;
-            border-left: 3px solid #94a3b8;
-            border-radius: 8px;
-            color: #475569;
-            line-height: 1.7;
+            padding: 13px 15px; background: var(--brand-soft); border-left: 3px solid var(--accent);
+            border-radius: 10px; color: #4451b5; line-height: 1.7; font-size: 13.5px;
         }
         </style>
         """,
@@ -241,6 +262,27 @@ def render_header(title: str, subtitle: str) -> None:
         """,
         unsafe_allow_html=True,
     )
+
+
+def render_steps(active: int) -> None:
+    """Show the 1->4 progress chips so a non-technical user always knows where they are."""
+
+    names = ["描述需求", "完善要求", "确认生成", "查看结果"]
+    chips = []
+    for index, name in enumerate(names, start=1):
+        cls = "step"
+        if index < active:
+            cls += " done"
+            mark = "✓"
+        elif index == active:
+            cls += " active"
+            mark = str(index)
+        else:
+            mark = str(index)
+        chips.append(
+            f'<div class="{cls}"><span class="dot">{mark}</span>{html.escape(name)}</div>'
+        )
+    st.markdown('<div class="steps">' + "".join(chips) + "</div>", unsafe_allow_html=True)
 
 
 def reset_generated_result() -> None:
@@ -376,9 +418,12 @@ def execute_generation(
     spec: TaskSpec,
     progress_callback: Any | None = None,
 ) -> None:
+    started_at = time.perf_counter()
+
     def progress(stage: str, message: str) -> None:
         if progress_callback:
-            progress_callback(stage, message)
+            elapsed = max(0, int(time.perf_counter() - started_at))
+            progress_callback(stage, f"{message}（已运行 {_format_elapsed(elapsed)}）")
 
     progress("prepare", "任务已接收，正在准备输入文件和生成目录……")
     spec.output_name = Path(str(spec.output_name or "自定义表格.xlsx")).name
@@ -452,7 +497,12 @@ def execute_generation(
         )
         st.session_state.task_spec = spec
         st.session_state.task_paths = task_paths
-        st.session_state.generation_result = generation.to_dict()
+        generation_data = generation.to_dict()
+        generation_data["elapsed_seconds"] = round(
+            time.perf_counter() - started_at,
+            1,
+        )
+        st.session_state.generation_result = generation_data
         st.session_state.validation_result = validation.to_dict()
         st.session_state.subjective_review_result = subjective
         st.session_state.versions.append(
@@ -478,6 +528,7 @@ def execute_generation(
             "message": "生成失败。",
             "error": f"{type(exc).__name__}: {exc}",
             "notices": [],
+            "elapsed_seconds": round(time.perf_counter() - started_at, 1),
         }
         st.session_state.validation_result = {
             "status": "error",
@@ -492,6 +543,54 @@ def execute_generation(
             "user_notice": "本次未完成审查。",
         }
         progress("error", f"任务失败：{type(exc).__name__}: {exc}")
+
+
+def _format_elapsed(seconds: int | float) -> str:
+    total = max(0, int(seconds))
+    minutes, remain = divmod(total, 60)
+    if minutes:
+        return f"{minutes}分{remain:02d}秒"
+    return f"{remain}秒"
+
+
+def run_generation_with_status(spec: TaskSpec, *, revision: bool = False) -> None:
+    """Show deterministic stage progress and a live elapsed-time indicator."""
+
+    label = "修改任务已接收，准备开始……" if revision else "任务已接收，准备开始……"
+    status_box = st.status(label, expanded=True)
+    progress_bar = st.progress(0, text="准备任务")
+    stage_values = {
+        "prepare": 5,
+        "input": 12,
+        "model": 28,
+        "build": 58,
+        "validate": 76,
+        "review": 90,
+        "complete": 100,
+        "error": 100,
+    }
+
+    def show_progress(stage: str, message: str) -> None:
+        value = stage_values.get(stage, 20)
+        progress_bar.progress(value, text=message)
+        status_box.write(message)
+        if stage == "complete":
+            status_box.update(
+                label="修改版已生成并检查完成" if revision else "表格已生成并检查完成",
+                state="complete",
+            )
+        elif stage == "error":
+            status_box.update(
+                label="修改失败" if revision else "生成失败",
+                state="error",
+            )
+
+    with st.spinner(
+        "正在运行，请勿关闭页面。计时器会持续显示已用时间。",
+        show_time=True,
+        width="stretch",
+    ):
+        execute_generation(spec, show_progress)
 
 
 def render_settings_page() -> None:
@@ -787,12 +886,17 @@ def render_requirement_check(spec: TaskSpec) -> None:
     plan = spec.options.get("content_plan", {})
     columns = [item for item in plan.get("columns", []) if item.get("name")]
     formulas = [item for item in plan.get("formula_rules", []) if item.get("target")]
+    inline_tables = [
+        item for item in plan.get("inline_tables", []) if isinstance(item, dict)
+    ]
     rows = int(plan.get("expected_data_rows") or 0)
     checks = [
         ("用途", TYPE_LABELS.get(spec.task_type, "通用表格")),
         (
             "数据",
-            f"已识别 {rows} 条文字数据"
+            f"已识别 {len(inline_tables)} 个内嵌数据表，主表 {rows} 行"
+            if inline_tables
+            else f"已识别 {rows} 条文字数据"
             if rows
             else f"将使用 {len(spec.input_files)} 个输入文件"
             if spec.input_files
@@ -902,31 +1006,38 @@ def render_confirmation(spec: TaskSpec) -> None:
             key=f"output_name_{nonce}",
         )
         render_plan(spec)
-        with st.expander("可选内容"):
+        with st.expander("图表与其他选项", expanded=spec.include_charts):
             col_a, col_b = st.columns(2)
             spec.include_charts = col_a.checkbox(
                 "生成图表",
                 value=spec.include_charts,
                 key=f"charts_{nonce}",
+                help="勾选后可在下面挑选想要的图表样式。",
             )
             spec.include_summary = col_b.checkbox(
                 "生成独立汇总页",
                 value=spec.include_summary,
                 key=f"summary_{nonce}",
             )
+            if spec.include_charts:
+                default_types = spec.options.get("chart_types") or [
+                    chart_type_from_text(spec.user_goal, default="column")
+                ]
+                chosen = st.multiselect(
+                    "想要的图表样式（可多选，不确定就保留默认）",
+                    options=list(CHART_TYPE_LABELS.keys()),
+                    default=[item for item in default_types if item in CHART_TYPE_LABELS]
+                    or ["column"],
+                    format_func=lambda value: CHART_TYPE_LABELS.get(value, value),
+                    key=f"chart_types_{nonce}",
+                )
+                spec.options["chart_types"] = chosen or ["column"]
+            else:
+                spec.options["chart_types"] = []
         st.session_state.task_spec = spec
         confirm, modify = st.columns(2)
         if confirm.button("确认并生成", type="primary", width="stretch"):
-            status_box = st.status("任务已接收，准备开始……", expanded=True)
-
-            def show_progress(stage: str, message: str) -> None:
-                status_box.write(message)
-                if stage == "complete":
-                    status_box.update(label="表格已生成并检查完成", state="complete")
-                elif stage == "error":
-                    status_box.update(label="生成失败", state="error")
-
-            execute_generation(spec, show_progress)
+            run_generation_with_status(spec)
             st.rerun()
         if modify.button("重新描述需求", width="stretch"):
             st.session_state.task_spec = None
@@ -1069,6 +1180,9 @@ def render_revision(spec: TaskSpec) -> None:
         key=f"revision_output_name_{spec.options.get('task_id', 'current')}",
     )
     if st.button("生成修改版", type="primary", width="stretch"):
+        if not request.strip():
+            st.warning("请先在上面填写要修改的内容，再点“生成修改版”。")
+            return
         try:
             revised = build_revision_task_spec(
                 spec,
@@ -1076,21 +1190,14 @@ def render_revision(spec: TaskSpec) -> None:
                 st.session_state.api_settings,
             )
             revised.output_name = output_name
-            status_box = st.status("修改任务已接收，准备开始……", expanded=True)
-
-            def show_revision_progress(stage: str, message: str) -> None:
-                status_box.write(message)
-                if stage == "complete":
-                    status_box.update(label="修改版已生成并检查完成", state="complete")
-                elif stage == "error":
-                    status_box.update(label="修改失败", state="error")
-
-            execute_generation(revised, show_revision_progress)
-            st.session_state.revision_request = ""
-            st.session_state.revision_output_name = ""
+            run_generation_with_status(revised, revision=True)
+            # Note: do NOT assign to st.session_state["revision_request"] here —
+            # that key belongs to the text_area widget above and Streamlit forbids
+            # writing it after the widget is created (it raised silently before,
+            # so the page never refreshed and the new version looked "stuck").
             st.rerun()
         except Exception as exc:
-            st.error(str(exc))
+            st.error(f"生成修改版时出错：{exc}")
     if len(st.session_state.versions) > 1:
         st.markdown("**本次会话中的版本**")
         for index, item in enumerate(st.session_state.versions, start=1):
@@ -1164,6 +1271,10 @@ def render_result() -> None:
             st.success(f"已生成：{spec.output_name}")
         else:
             st.error(generation.get("error") or "生成失败。")
+        if generation.get("elapsed_seconds") is not None:
+            st.caption(
+                f"本次运行用时：{_format_elapsed(generation['elapsed_seconds'])}"
+            )
         for notice in generation.get("notices", []):
             st.info(str(notice))
 
@@ -1187,11 +1298,22 @@ def render_result() -> None:
 def render_workbench() -> None:
     render_header(
         "本地表格助手",
-        "描述你需要的内容，确认后生成表格；生成后可直接预览、检查并继续修改。",
+        "用大白话描述你要的表格，确认后一键生成；生成后可在线预览、检查、调整图表并继续修改。",
     )
+    spec_state = st.session_state.task_spec
+    if st.session_state.task_paths is not None:
+        active_step = 4
+    elif spec_state and not st.session_state.clarification_done:
+        active_step = 2
+    elif spec_state:
+        active_step = 3
+    else:
+        active_step = 1
+    render_steps(active_step)
+
     if st.session_state.task_paths is not None:
         action_col, spacer = st.columns([1.4, 6])
-        if action_col.button("制作另一张表格", width="stretch"):
+        if action_col.button("＋ 制作另一张表格", width="stretch"):
             start_new_task()
             st.rerun()
         render_result()

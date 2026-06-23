@@ -77,7 +77,13 @@ def read_table(path: str | Path, sheet_name: str | int | None = 0) -> pd.DataFra
 
 
 def convert_legacy_xls(path: str | Path, output_dir: str | Path) -> Path:
-    """Convert a legacy .xls workbook to .xlsx for template-preserving operations."""
+    """Convert a legacy .xls workbook to .xlsx for template-preserving operations.
+
+    LibreOffice gives the highest-fidelity conversion (styles, merges, print
+    setup). When it is not installed, fall back to a basic xlrd -> openpyxl
+    conversion that preserves sheet names, headers, values and layout so the
+    template can still be used as a reference instead of failing outright.
+    """
 
     source = Path(path).resolve()
     if source.suffix.lower() != ".xls":
@@ -85,10 +91,15 @@ def convert_legacy_xls(path: str | Path, output_dir: str | Path) -> Path:
     destination_dir = Path(output_dir).resolve()
     destination_dir.mkdir(parents=True, exist_ok=True)
     soffice = _find_soffice()
-    if not soffice:
-        raise RuntimeError(
-            "当前系统可以读取 .xls 数据，但要把 .xls 作为模板使用，需要安装 LibreOffice。"
-        )
+    if soffice:
+        try:
+            return _convert_xls_with_soffice(source, destination_dir, soffice)
+        except (subprocess.SubprocessError, OSError, RuntimeError):
+            pass  # Fall through to the dependency-free basic conversion.
+    return _convert_xls_basic(source, destination_dir)
+
+
+def _convert_xls_with_soffice(source: Path, destination_dir: Path, soffice: str) -> Path:
     with tempfile.TemporaryDirectory(prefix="ai_excel_xls_") as temporary:
         completed = subprocess.run(
             [
@@ -112,6 +123,43 @@ def convert_legacy_xls(path: str | Path, output_dir: str | Path) -> Path:
         target = destination_dir / converted.name
         shutil.copy2(converted, target)
         return target
+
+
+def _convert_xls_basic(source: Path, destination_dir: Path) -> Path:
+    """Dependency-free .xls -> .xlsx conversion using xlrd (values and layout)."""
+
+    try:
+        import xlrd
+    except ImportError as exc:  # pragma: no cover - xlrd is a declared dependency
+        raise RuntimeError(
+            "读取 .xls 模板需要 xlrd。请重新运行 install.bat 安装最新依赖。"
+        ) from exc
+    from openpyxl import Workbook
+
+    destination_dir.mkdir(parents=True, exist_ok=True)
+    book = xlrd.open_workbook(str(source))
+    wb = Workbook()
+    wb.remove(wb.active)
+    for sheet in book.sheets():
+        ws = wb.create_sheet(safe_sheet_name(sheet.name or "Sheet"))
+        for row_index in range(sheet.nrows):
+            for col_index in range(sheet.ncols):
+                cell = sheet.cell(row_index, col_index)
+                value = cell.value
+                if cell.ctype == xlrd.XL_CELL_DATE:
+                    try:
+                        value = xlrd.xldate.xldate_as_datetime(value, book.datemode)
+                    except (ValueError, OverflowError):
+                        pass
+                elif cell.ctype == xlrd.XL_CELL_BOOLEAN:
+                    value = bool(value)
+                if value not in (None, ""):
+                    ws.cell(row_index + 1, col_index + 1, value)
+    if not wb.sheetnames:
+        wb.create_sheet("Sheet1")
+    target = destination_dir / f"{source.stem}.xlsx"
+    wb.save(target)
+    return target
 
 
 def _read_delimited_text(source: Path) -> pd.DataFrame:

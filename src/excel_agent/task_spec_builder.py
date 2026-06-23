@@ -7,7 +7,12 @@ from pathlib import Path
 from typing import Any
 
 from .content_plan import build_local_content_plan, suggest_output_name
-from .intent_classifier import KEYWORDS, SUPPORTED_TYPES, classify_intent, normalize_table_type
+from .intent_classifier import (
+    SUPPORTED_TYPES,
+    classify_intent,
+    normalize_table_type,
+    ranked_intents,
+)
 from .requirement_analysis import analyze_requirement_gaps, questions_from_gaps
 from .task_spec import TaskSpec, TaskSpecDraft
 
@@ -169,7 +174,11 @@ def merge_user_answers_into_task_spec(task_spec: TaskSpec, answers: dict[str, An
             setattr(merged, key, bool(clean_answers[key]))
 
     data_mode = str(clean_answers.get("data_mode", "")).strip()
-    if data_mode == "template" and not merged.input_files:
+    current_content = merged.options.get("content_plan", {})
+    has_inline_data = bool(
+        current_content.get("records") or current_content.get("inline_tables")
+    )
+    if data_mode == "template" and not merged.input_files and not has_inline_data:
         _append_unique(merged.assumptions, "未提供原始数据，当前版本将生成标准模板示例。")
     elif data_mode == "upload" and not merged.input_files:
         _append_unique(merged.assumptions, "用户计划使用原始数据，但确认时尚未提供可用文件。")
@@ -231,14 +240,7 @@ def _build_questions(
 
 
 def _classification_alternatives(prompt: str) -> list[str]:
-    lowered = prompt.lower()
-    scored: list[tuple[int, int, str]] = []
-    for table_type, words in KEYWORDS.items():
-        matched = [word for word in words if word.lower() in lowered]
-        if matched:
-            scored.append((len(matched), len("".join(matched)), table_type))
-    scored.sort(reverse=True)
-    return [table_type for _, _, table_type in scored]
+    return ranked_intents(prompt)
 
 
 def _needs_input_file(prompt: str) -> bool:

@@ -115,7 +115,29 @@ def _apply_task_fidelity_checks(
 ) -> None:
     agent_plan = task_spec.options.get("agent_blueprint")
     content_plan = task_spec.options.get("content_plan", {})
-    if isinstance(agent_plan, dict) and agent_plan.get("columns"):
+    if isinstance(agent_plan, dict) and agent_plan.get("sheets"):
+        sheet_plans = [
+            item for item in agent_plan.get("sheets", []) if isinstance(item, dict)
+        ]
+        primary = max(
+            sheet_plans,
+            key=lambda item: len(item.get("records", [])),
+            default={},
+        )
+        plan = {
+            "title": agent_plan.get("title") or primary.get("title"),
+            "columns": [
+                {"name": item.get("label")}
+                for item in primary.get("columns", [])
+                if isinstance(item, dict)
+            ],
+            "expected_data_rows": len(primary.get("records", [])),
+            "expected_sheet_names": [
+                str(item.get("sheet_name") or "") for item in sheet_plans
+            ],
+            "explicit_structure": True,
+        }
+    elif isinstance(agent_plan, dict) and agent_plan.get("columns"):
         plan = {
             "title": agent_plan.get("title"),
             "columns": [
@@ -128,11 +150,28 @@ def _apply_task_fidelity_checks(
         }
     else:
         plan = content_plan
-    if not isinstance(plan, dict) or not plan.get("explicit_structure"):
-        return
     try:
         wb = load_workbook(output_file, data_only=False)
     except Exception:
+        return
+    if task_spec.include_charts and sum(len(ws._charts) for ws in wb.worksheets) == 0:
+        _fidelity_error(report, "requirement_chart", "用户要求图表，但工作簿中未找到图表。")
+    if "公式" in task_spec.user_goal:
+        formula_count = sum(
+            1
+            for ws in wb.worksheets
+            for row in ws.iter_rows()
+            for cell in row
+            if isinstance(cell.value, str) and cell.value.startswith("=")
+        )
+        if formula_count == 0:
+            _fidelity_error(
+                report,
+                "requirement_formula",
+                "用户明确要求使用公式，但工作簿中没有公式。",
+            )
+    if not isinstance(plan, dict) or not plan.get("explicit_structure"):
+        report["summary"]["requirement_fidelity_checked"] = True
         return
     expected_columns = [
         str(item.get("name", "")).strip()
@@ -143,22 +182,43 @@ def _apply_task_fidelity_checks(
     target = None
     detected_headers: list[str] = []
     header_row = None
+    best_overlap = 0
     for ws in wb.worksheets:
+        if ws.title.strip().lower() in {"说明", "instructions", "readme", "使用说明"}:
+            continue
         for row in range(1, min(ws.max_row, 12) + 1):
-            values = [
+            row_values = [
                 str(ws.cell(row, column).value).strip()
                 for column in range(1, ws.max_column + 1)
                 if ws.cell(row, column).value not in (None, "")
             ]
-            if expected_columns and len(set(values) & set(expected_columns)) >= max(
-                1, min(2, len(expected_columns))
+            next_values = (
+                [
+                    str(ws.cell(row + 1, column).value).strip()
+                    for column in range(1, ws.max_column + 1)
+                    if ws.cell(row + 1, column).value not in (None, "")
+                ]
+                if row < ws.max_row
+                else []
+            )
+            values = list(dict.fromkeys([*row_values, *next_values]))
+            overlap = sum(
+                any(_labels_match(expected, found) for found in values)
+                for expected in expected_columns
+            )
+            required_overlap = min(
+                len(expected_columns),
+                max(2, min(4, len(expected_columns))),
+            )
+            if (
+                expected_columns
+                and overlap >= required_overlap
+                and overlap > best_overlap
             ):
                 target = ws
                 detected_headers = values
                 header_row = row
-                break
-        if target is not None:
-            break
+                best_overlap = overlap
 
     if target is None:
         _fidelity_error(
@@ -168,7 +228,11 @@ def _apply_task_fidelity_checks(
         )
         return
 
-    missing = [name for name in expected_columns if name not in detected_headers]
+    missing = [
+        name
+        for name in expected_columns
+        if not any(_labels_match(name, found) for found in detected_headers)
+    ]
     if missing:
         _fidelity_error(
             report,
@@ -201,8 +265,22 @@ def _apply_task_fidelity_checks(
                 f"需求中识别到 {expected_rows} 条数据，但表格只有 {actual_rows} 条。",
             )
 
-    if task_spec.include_charts and sum(len(ws._charts) for ws in wb.worksheets) == 0:
-        _fidelity_warning(report, "requirement_chart", "用户要求图表，但工作簿中未找到图表。")
+    expected_sheet_names = [
+        str(item).strip()
+        for item in plan.get("expected_sheet_names", [])
+        if str(item).strip()
+    ]
+    if expected_sheet_names:
+        visible_names = [
+            ws.title for ws in wb.worksheets if ws.sheet_state == "visible"
+        ]
+        if len(visible_names) < len(expected_sheet_names):
+            _fidelity_error(
+                report,
+                "requirement_sheets",
+                f"需求中识别到 {len(expected_sheet_names)} 个数据表，"
+                f"但工作簿只有 {len(visible_names)} 个可见工作表。",
+            )
 
     report["summary"]["requirement_fidelity_checked"] = True
     report["summary"]["expected_column_count"] = len(expected_columns)
@@ -219,3 +297,24 @@ def _fidelity_warning(report: dict[str, Any], check: str, message: str) -> None:
     report["warnings"].append({"check": check, "message": message})
     if report.get("status") == "pass":
         report["status"] = "warn"
+
+
+def _labels_match(expected: str, actual: str) -> bool:
+    def normalize(value: str) -> str:
+        return (
+            str(value)
+            .replace("（", "(")
+            .replace("）", ")")
+            .replace(" ", "")
+            .lower()
+        )
+
+    wanted = normalize(expected)
+    found = normalize(actual)
+    if wanted == found:
+        return True
+    if not wanted or not found:
+        return False
+    if max(len(wanted), len(found)) > min(len(wanted), len(found)) * 2 + 4:
+        return False
+    return wanted in found or found in wanted

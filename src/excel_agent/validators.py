@@ -233,7 +233,11 @@ def _check_sheet_level(ws, report: dict[str, Any]) -> None:
 
 
 def _check_headers(ws, header: dict[str, Any] | None, report: dict[str, Any]) -> None:
-    if _is_instruction_sheet(ws.title) or header is None:
+    if (
+        _is_instruction_sheet(ws.title)
+        or ("参数" in ws.title and not ws.auto_filter.ref)
+        or header is None
+    ):
         return
     row = header["row"]
     headers = header["headers"]
@@ -468,21 +472,39 @@ def _check_data_quality(ws, cached_ws, header: dict[str, Any] | None, report: di
                 _add_warning(report, "negative_inventory", f"库存列 {header_value} 存在负库存: {negatives[:8]}", sheet=ws.title)
 
 
+def _cells_in_ref(ws, ref: str) -> set[str]:
+    """Return the set of cell coordinates a string range covers.
+
+    ``ws[ref]`` returns a Cell for a single-cell ref ("A1") and tuples-of-rows
+    for a real range ("A1:C3") — we have to handle both shapes or it crashes.
+    """
+
+    region = ws[ref]
+    if hasattr(region, "coordinate"):  # single Cell
+        return {region.coordinate}
+    cells: set[str] = set()
+    for row in region:
+        if hasattr(row, "coordinate"):
+            cells.add(row.coordinate)
+        else:
+            cells.update(cell.coordinate for cell in row)
+    return cells
+
+
 def _check_merged_filter_area(ws, report: dict[str, Any]) -> None:
     if not ws.auto_filter.ref:
         return
     header_row = _find_header_row(ws) or 0
-    filter_range = ws[ws.auto_filter.ref]
-    filter_cells = {cell.coordinate for row in filter_range for cell in row}
+    filter_cells = _cells_in_ref(ws, ws.auto_filter.ref)
     for merged in ws.merged_cells.ranges:
         if merged.min_row <= header_row:
             continue
         top_left = ws.cell(merged.min_row, merged.min_col).value
         if merged.min_row == merged.max_row and any(
-            word in str(top_left or "") for word in ("小计", "总计", "合计")
+            word in str(top_left or "") for word in ("小计", "总计", "合计", "汇总")
         ):
             continue
-        merged_cells = {cell.coordinate for row in ws[str(merged)] for cell in row}
+        merged_cells = _cells_in_ref(ws, str(merged))
         if filter_cells & merged_cells:
             _add_warning(report, "merged_filter_area", f"合并单元格 {merged} 与筛选区域重叠。", sheet=ws.title)
 
@@ -685,13 +707,14 @@ def _cell_effective_value(cell, cached_ws) -> Any:
 
 
 def _has_division_risk(formula: str) -> bool:
-    upper = formula.upper()
-    if "/" not in formula:
+    formula_without_strings = re.sub(r'"(?:[^"]|"")*"', "", formula)
+    upper = formula_without_strings.upper()
+    if "/" not in formula_without_strings:
         return False
     if "IFERROR" in upper or "IF(" in upper:
         return False
     # Ignore simple divisions by numeric constants, e.g. /12.
-    risky_parts = re.findall(r"/\s*([^,+\-*/\)]+)", formula)
+    risky_parts = re.findall(r"/\s*([^,+\-*/\)]+)", formula_without_strings)
     for part in risky_parts:
         try:
             return float(part.strip()) == 0
