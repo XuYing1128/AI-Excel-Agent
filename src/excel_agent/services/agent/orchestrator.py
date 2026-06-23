@@ -77,8 +77,9 @@ def run_agent(
         progress=progress,
         run_python_enabled=settings.run_python_enabled,
     )
+    matched_skills = _matched_skills(task_spec)
     messages = [
-        {"role": "system", "content": _system_prompt()},
+        {"role": "system", "content": _system_prompt(matched_skills)},
         {
             "role": "user",
             "content": json.dumps(
@@ -101,7 +102,11 @@ def run_agent(
         task_paths,
         event="agent_orchestrator_started",
         status="running",
-        details={"provider": provider.name, "model": provider.model},
+        details={
+            "provider": provider.name,
+            "model": provider.model,
+            "skills": [item.get("name") for item in matched_skills],
+        },
     )
     built = False
     tool_calls = 0
@@ -270,14 +275,20 @@ def _json_instruction_to_call(content: str) -> Any | None:
     return _Call()
 
 
-def _system_prompt() -> str:
-    return (
+def _system_prompt(skills: list[dict[str, str]] | None = None) -> str:
+    base = (
         "你是本地 Excel 表格生成智能体。你不能直接写文件，也不能输出 Markdown 当作结果。"
-        "你必须选择工具：build_workbook 生成，validate_workbook 检查，finish_task 完成。"
+        "你必须选择已提供的工具推进任务，常用顺序是生成/处理 → validate_workbook 检查 → finish_task 完成。"
         "所有计算列必须写 Excel 公式模板，并考虑 IFERROR、空值和除零。"
         "用户要求图表时必须在方案里包含 charts；用户给出的列、标题、分组、小计、总计优先。"
         "不要复述全量数据，按已确认任务和文件摘要设计结构。"
     )
+    if not skills:
+        return base
+    blocks = []
+    for item in skills[:2]:
+        blocks.append(f"\n\n【可用技能：{item['name']}】\n{item['content'][:5000]}")
+    return base + "".join(blocks)
 
 
 def _safe_task_spec(task_spec: TaskSpec) -> dict[str, Any]:
@@ -301,3 +312,15 @@ def _workbook_has_charts(blueprint: dict[str, Any]) -> bool:
 def _progress(progress: ProgressCallback | None, stage: str, message: str) -> None:
     if progress:
         progress(stage, message)
+
+
+def _matched_skills(task_spec: TaskSpec) -> list[dict[str, str]]:
+    try:
+        from skills.registry import match_skills
+
+        return [
+            {"name": item.name, "content": item.content}
+            for item in match_skills(task_spec)[:2]
+        ]
+    except Exception:
+        return []
