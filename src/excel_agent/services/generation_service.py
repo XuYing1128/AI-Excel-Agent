@@ -32,6 +32,7 @@ from .llm_workbook_agent import (
     generate_blueprint_via_json,
     generate_with_llm_agent,
 )
+from .agent.orchestrator import run_agent
 
 
 GENERATION_API_VERSION = 2
@@ -194,10 +195,51 @@ def _generate_with_model(
         template_paths_for_fast
         and task_spec.input_files
         and template_mode_for_fast in {"flexible", "strict"}
-    ):
+        ):
         if progress:
             progress("build", "已识别上传的模板与数据，正在按模板精确填入……")
         return _local_generate(task_spec, task_paths, progress, notices)
+
+    registry_settings = load_model_settings()
+    builder_settings = get_role_api_settings(
+        "builder",
+        registry_settings,
+        use_for_intent=False,
+        use_for_review=False,
+        use_for_generation=True,
+    )
+    if (
+        registry_settings.agent_enabled
+        and builder_settings is not None
+        and _same_model_endpoint(settings, builder_settings)
+    ):
+        agent_result = run_agent(task_spec, task_paths, progress=progress)
+        if agent_result.success:
+            template_notices = _apply_selected_template(task_spec, task_paths)
+            save_task_spec(task_spec, task_paths.task_spec_file)
+            result = GenerationResult(
+                success=True,
+                output_file=agent_result.output_file,
+                message=agent_result.message,
+                error=None,
+                used_command="excel_agent.services.agent.orchestrator.run_agent",
+                mode=agent_result.mode,
+                notices=[*notices, *(agent_result.notices or []), *template_notices],
+                agent_tool_calls=agent_result.tool_calls,
+                agent_rounds=agent_result.steps,
+                blueprint_file=agent_result.blueprint_file,
+            )
+            append_run_log_event(
+                task_paths,
+                event="generation_completed",
+                status="success",
+                details=result.to_dict(),
+            )
+            return result
+        notices.append(
+            "多步智能体未能完成本次任务，已自动切换到兼容生成路径。"
+            f"（反馈：{(agent_result.error or '未知原因')[:120]}）"
+        )
 
     agent = generate_with_llm_agent(task_spec, task_paths, settings, progress=progress)
     if not agent.success:
@@ -461,6 +503,18 @@ def _apply_task_options(output_file: Path, task_spec: TaskSpec) -> list[str]:
     if changed:
         wb.save(output_file)
     return notices
+
+
+def _same_model_endpoint(left: ApiSettings, right: ApiSettings) -> bool:
+    """Avoid accidentally using a different saved provider than the caller chose."""
+
+    return (
+        left.configured
+        and right.configured
+        and left.base_url == right.base_url
+        and left.model == right.model
+        and left.api_key == right.api_key
+    )
 
 
 def _apply_selected_template(
