@@ -59,6 +59,7 @@ description: Use this skill whenever the user asks to create, edit, analyze, cle
 - 主观审查失败或未启用不影响已通过客观校验的文件下载。
 - 接口设置必须位于独立页面，并通过显式保存才生效，避免误触修改。
 - 本地可以配置多个 OpenAI 兼容模型，并按 planner/builder/reviewer/fast/coder 角色分工；未配置角色时必须回退到任一可用 provider 或本地规则。
+- `run_python` 只能用于当前任务目录内的长尾数据处理，必须限时、禁网络、限制用户代码 import，且只允许读取任务输入、写入任务输出或临时目录。
 
 ## 工具选择规则
 

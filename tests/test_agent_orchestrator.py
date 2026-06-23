@@ -106,3 +106,44 @@ def test_agent_orchestrator_returns_failure_when_model_stalls(tmp_path, monkeypa
     assert result.success is False
     assert "工具" in (result.error or "")
 
+
+def test_agent_orchestrator_can_use_run_python_for_long_tail_task(tmp_path, monkeypatch):
+    model_path = tmp_path / "model_settings.json"
+    _write_model_settings(model_path)
+    monkeypatch.setenv("AI_EXCEL_MODEL_SETTINGS_FILE", str(model_path))
+    code = r'''
+from openpyxl import Workbook
+wb = Workbook()
+ws = wb.active
+ws.title = "去重统计"
+ws.append(["姓名", "科目数"])
+ws.append(["张三", 2])
+ws.append(["李四", 1])
+wb.save(OUTPUT_DIR + "/result.xlsx")
+'''
+
+    def fake_chat_with_tools(*args, **kwargs):
+        return ToolChatResult(
+            success=True,
+            content="",
+            tool_calls=[
+                ToolCall("call_python", "run_python", {"code": code, "timeout_seconds": 10}),
+                ToolCall("call_finish", "finish_task", {"summary": "完成"}),
+            ],
+            error=None,
+            status_code=200,
+            latency_ms=10,
+            message={"role": "assistant", "content": "", "tool_calls": []},
+        )
+
+    monkeypatch.setattr(orchestrator.model_registry, "chat_with_tools", fake_chat_with_tools)
+    paths = create_task_paths("generic_table", tmp_path / "tasks", output_name="result.xlsx")
+    result = orchestrator.run_agent(
+        TaskSpec(task_type="generic_table", user_goal="合并名单去重并统计每人科目数"),
+        paths,
+        max_steps=2,
+    )
+
+    assert result.success is True
+    wb = load_workbook(paths.output_file)
+    assert wb["去重统计"]["A1"].value == "姓名"

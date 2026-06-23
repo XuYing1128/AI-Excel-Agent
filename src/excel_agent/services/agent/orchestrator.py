@@ -11,12 +11,13 @@ from pathlib import Path
 from typing import Any, Callable
 
 from ...model_registry import load_model_settings
-from ...rich_workbook_builder import build_rich_workbook, normalize_workbook_blueprint
+from ...rich_workbook_builder import normalize_workbook_blueprint
 from ...task_paths import TaskPaths, append_run_log_event
 from ...task_spec import TaskSpec
 from ...validators import validate_workbook
 from ..custom_api_service import parse_json_object
 from ... import model_registry
+from .tools import ToolContext, tool_map, tool_schemas
 
 
 ProgressCallback = Callable[[str, str], None]
@@ -70,6 +71,12 @@ def run_agent(
 
     _progress(progress, "model", "正在由智能体分析任务并选择本地工具……")
     blueprint_path = task_paths.task_dir / "agent_workbook_blueprint.json"
+    tool_context = ToolContext(
+        task_spec=task_spec,
+        task_paths=task_paths,
+        progress=progress,
+        run_python_enabled=settings.run_python_enabled,
+    )
     messages = [
         {"role": "system", "content": _system_prompt()},
         {
@@ -107,7 +114,7 @@ def run_agent(
             "builder",
             settings=settings,
             messages=messages,
-            tools=_tool_schemas(),
+            tools=tool_schemas(tool_context),
             tool_choice="auto",
             temperature=0.05,
             max_tokens=8000,
@@ -143,13 +150,11 @@ def run_agent(
             result = _dispatch_tool(
                 call.name,
                 call.arguments,
-                task_spec,
-                task_paths,
+                tool_context,
                 blueprint_path,
-                progress,
             )
             last_error = "" if result.get("ok") else str(result.get("error") or result.get("summary") or "")
-            if call.name == "build_workbook" and result.get("ok"):
+            if call.name in {"build_workbook", "build_rich_workbook"} and result.get("ok"):
                 built = True
             if call.name == "finish_task" and result.get("ok"):
                 completed = True
@@ -225,58 +230,26 @@ def run_agent(
 def _dispatch_tool(
     name: str,
     args: dict[str, Any],
-    task_spec: TaskSpec,
-    task_paths: TaskPaths,
+    ctx: ToolContext,
     blueprint_path: Path,
-    progress: ProgressCallback | None,
 ) -> dict[str, Any]:
-    if name == "build_workbook":
-        blueprint = args.get("blueprint", args)
+    tools = tool_map(ctx)
+    tool = tools.get(name)
+    if tool is None:
+        return {"ok": False, "summary": f"未知工具：{name}", "error": "unknown_tool"}
+    if name in {"build_workbook", "build_rich_workbook"}:
         try:
-            normalized = normalize_workbook_blueprint(blueprint)
-            if task_spec.include_charts and not _workbook_has_charts(normalized):
+            normalized = normalize_workbook_blueprint(args.get("blueprint", args))
+            if ctx.task_spec.include_charts and not _workbook_has_charts(normalized):
                 normalized["require_charts"] = True
             blueprint_path.write_text(
                 json.dumps(normalized, ensure_ascii=False, indent=2),
                 encoding="utf-8",
             )
-            _progress(progress, "build", "智能体已提交方案，正在写入 Excel 文件……")
-            build_rich_workbook(
-                normalized,
-                task_paths.output_file,
-                require_charts=task_spec.include_charts,
-            )
-            report = validate_workbook(task_paths.output_file)
-            return {
-                "ok": report.get("status") in {"pass", "warn"},
-                "summary": f"已生成文件，校验状态：{report.get('status')}",
-                "data": {"validation_status": report.get("status")},
-                "artifacts": [str(task_paths.output_file), str(blueprint_path)],
-            }
+            args = {"blueprint": normalized}
         except Exception as exc:
             return {"ok": False, "summary": "生成失败。", "error": f"{type(exc).__name__}: {exc}"}
-    if name == "validate_workbook":
-        if not task_paths.output_file.exists():
-            return {"ok": False, "summary": "还没有生成工作簿。", "error": "output_missing"}
-        report = validate_workbook(task_paths.output_file)
-        return {
-            "ok": report.get("status") in {"pass", "warn"},
-            "summary": f"校验状态：{report.get('status')}",
-            "data": {
-                "status": report.get("status"),
-                "error_count": len(report.get("errors", [])),
-                "warning_count": len(report.get("warnings", [])),
-            },
-            "artifacts": [str(task_paths.output_file)],
-        }
-    if name == "finish_task":
-        ok = task_paths.output_file.exists()
-        return {
-            "ok": ok,
-            "summary": str(args.get("summary") or ("任务已完成。" if ok else "还没有生成文件。")),
-            "artifacts": [str(task_paths.output_file)] if ok else [],
-        }
-    return {"ok": False, "summary": f"未知工具：{name}", "error": "unknown_tool"}
+    return tool.handler(args, ctx).to_dict()
 
 
 def _json_instruction_to_call(content: str) -> Any | None:
@@ -295,47 +268,6 @@ def _json_instruction_to_call(content: str) -> Any | None:
         arguments = args
 
     return _Call()
-
-
-def _tool_schemas() -> list[dict[str, Any]]:
-    return [
-        {
-            "type": "function",
-            "function": {
-                "name": "build_workbook",
-                "description": "提交完整工作簿方案，由本地工具生成 xlsx。",
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "blueprint": {
-                            "type": "object",
-                            "description": "工作簿方案。单表或包含 sheets 的多表结构均可。",
-                        }
-                    },
-                    "required": ["blueprint"],
-                },
-            },
-        },
-        {
-            "type": "function",
-            "function": {
-                "name": "validate_workbook",
-                "description": "检查已生成工作簿能否打开、公式和结构是否有明显问题。",
-                "parameters": {"type": "object", "properties": {}},
-            },
-        },
-        {
-            "type": "function",
-            "function": {
-                "name": "finish_task",
-                "description": "确认任务完成。只有本地文件已生成并通过校验后才能调用。",
-                "parameters": {
-                    "type": "object",
-                    "properties": {"summary": {"type": "string"}},
-                },
-            },
-        },
-    ]
 
 
 def _system_prompt() -> str:
@@ -369,4 +301,3 @@ def _workbook_has_charts(blueprint: dict[str, Any]) -> bool:
 def _progress(progress: ProgressCallback | None, stage: str, message: str) -> None:
     if progress:
         progress(stage, message)
-
