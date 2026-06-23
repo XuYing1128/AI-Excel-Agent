@@ -10,7 +10,8 @@ from ..api_settings import ApiSettings
 from ..model_registry import get_role_api_settings
 from ..task_paths import TaskPaths, append_run_log_event
 from ..task_spec import TaskSpec
-from .custom_api_service import chat_completion, parse_json_object
+from .custom_api_service import chat_completion
+from .review.structured_review import run_structured_reviews
 
 
 def run_subjective_review(
@@ -60,69 +61,23 @@ def run_subjective_review(
             "notices": generation_summary.get("notices", []),
         },
     }
-    response = chat_completion(
-        settings,
-        system_prompt=(
-            "你是表格交付的主观审查助手。你只能评价是否符合用户目标、说明是否清楚、"
-            "是否有过度设计风险。不能评价客观正确性，不能输出代码，不能要求修改单元格。"
-            "必须以任务方案中的最终确认项为准：include_charts=true 表示用户明确要求图表，"
-            "不得说图表未要求或建议删除；include_summary=true 同理。"
-            "说明页或填写说明属于项目强制质量要求，不得仅因用户原始文字未提及就判定为多余。"
-            "审查时必须核对工作簿结构摘要中的 chart_count 是否满足 include_charts。"
-            "只返回 JSON 对象，不要 Markdown。字段为：status、fit_to_user_goal、"
-            "over_design_risk、concerns、suggestions。status 只能是 pass 或 warn；"
-            "over_design_risk 只能是 low、medium、high。concerns 和 suggestions 必须是中文数组。"
-        ),
-        user_prompt=json.dumps(safe_context, ensure_ascii=False),
-        temperature=0.1,
-        max_tokens=700,
-    )
-    if not response.success:
-        result = _disabled_result(
-            f"建议审查调用失败，不影响文件下载：{response.error}",
-            task_spec,
-            validation_summary,
-            workbook_summary,
-            generation_summary,
+    reviews = [
+        _filter_structured_review(review, task_spec)
+        for review in run_structured_reviews(
+            safe_context,
+            settings,
+            chat_func=chat_completion,
         )
-        result["error"] = response.error
-        _save_result(result, task_paths)
-        append_run_log_event(
-            task_paths,
-            event="subjective_review_failed",
-            status="warn",
-            details={"error": response.error},
-        )
-        return result
-
-    try:
-        payload = parse_json_object(response.content)
-        review = _normalize_review(payload, settings.provider_name, task_spec)
-    except (ValueError, TypeError) as exc:
-        result = _disabled_result(
-            f"建议审查结果无法解析，不影响文件下载：{exc}",
-            task_spec,
-            validation_summary,
-            workbook_summary,
-            generation_summary,
-        )
-        result["error"] = str(exc)
-        _save_result(result, task_paths)
-        append_run_log_event(
-            task_paths,
-            event="subjective_review_failed",
-            status="warn",
-            details={"error": str(exc)},
-        )
-        return result
+    ]
+    has_issue = any(review.get("status") in {"warn", "fail"} for review in reviews)
 
     result = {
         "enabled": True,
-        "reviews": [review],
-        "agreement": "single_model",
+        "reviews": reviews,
+        "agreement": "structured_dual_review",
         "user_notice": (
             "建议审查未发现明显问题，但最终以你的确认和确定性校验为准。"
-            if review["status"] == "pass"
+            if not has_issue
             else "建议审查发现需要留意的主观问题，请查看下面的建议。"
         ),
         "input_policy": {
@@ -136,14 +91,17 @@ def run_subjective_review(
             "sheet_count": workbook_summary.get("sheet_count"),
             "generation_mode": generation_summary.get("mode"),
         },
-        "revision_prompt": _revision_prompt_from_review(review),
+        "revision_prompt": _revision_prompt_from_reviews(reviews),
     }
     _save_result(result, task_paths)
     append_run_log_event(
         task_paths,
         event="subjective_review_completed",
         status="success",
-        details={"provider": settings.provider_name, "review_status": review["status"]},
+        details={
+            "provider": settings.provider_name,
+            "review_statuses": [review.get("status") for review in reviews],
+        },
     )
     return result
 
@@ -273,6 +231,38 @@ def _revision_prompt_from_review(review: dict[str, Any]) -> str:
         *[f"采用建议：{item}" for item in review.get("suggestions", [])],
     ]
     return "\n".join(lines)
+
+
+def _revision_prompt_from_reviews(reviews: list[dict[str, Any]]) -> str:
+    lines: list[str] = []
+    for review in reviews:
+        prompt = _revision_prompt_from_review(review)
+        if prompt:
+            lines.extend(prompt.splitlines())
+    return "\n".join(dict.fromkeys(lines))
+
+
+def _filter_structured_review(
+    review: dict[str, Any],
+    task_spec: TaskSpec,
+) -> dict[str, Any]:
+    filtered = dict(review)
+    concerns = [
+        str(item)
+        for item in filtered.get("concerns", filtered.get("issues", []))
+        if not _contradicts_confirmed_options(str(item), task_spec)
+    ]
+    suggestions = [
+        str(item)
+        for item in filtered.get("suggestions", [])
+        if not _contradicts_confirmed_options(str(item), task_spec)
+    ]
+    filtered["concerns"] = concerns
+    filtered["issues"] = concerns
+    filtered["suggestions"] = suggestions
+    if not concerns and filtered.get("status") == "warn":
+        filtered["status"] = "pass"
+    return filtered
 
 
 def _contradicts_confirmed_options(text: str, task_spec: TaskSpec) -> bool:

@@ -1389,6 +1389,14 @@ def render_review(
     if not reviews:
         st.info("本次没有启用建议审查。你仍可以在“继续修改”中直接提出修改要求。")
         return
+    labels = {
+        "requirement_review": "需求一致性",
+        "excel_usability_review": "Excel 可用性",
+    }
+    st.markdown("**审查项**")
+    for review in reviews:
+        name = labels.get(str(review.get("reviewer")), str(review.get("reviewer", "审查")))
+        st.write(f"• {name}：{status_label(str(review.get('status', 'warn')))}")
     concerns, suggestions = review_items(subjective)
     if concerns:
         st.markdown("**需要调整**")
