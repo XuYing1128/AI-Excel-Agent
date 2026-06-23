@@ -8,6 +8,7 @@ from dataclasses import dataclass
 from ..api_settings import ApiSettings
 from ..content_plan import merge_model_content_plan, suggest_output_name
 from ..intent_classifier import SUPPORTED_TYPES
+from ..model_registry import get_role_api_settings
 from ..task_spec import TaskSpecDraft
 from .custom_api_service import chat_completion, parse_json_object
 
@@ -26,15 +27,25 @@ def enhance_task_spec_draft(
     input_file_names: list[str],
     settings: ApiSettings,
 ) -> ApiPlanningResult:
-    if not settings.configured or not settings.use_for_intent:
+    active_settings = (
+        settings
+        if settings.configured and settings.use_for_intent
+        else get_role_api_settings(
+            "planner",
+            use_for_intent=True,
+            use_for_review=False,
+            use_for_generation=False,
+        )
+    )
+    if active_settings is None or not active_settings.configured or not active_settings.use_for_intent:
         return ApiPlanningResult(draft, False, "使用本地规则完成需求分析。")
 
     # Reasoning ("thinking") models spend a large part of the completion budget
     # before emitting the JSON plan, and can be slow. Give the analysis call a
     # longer timeout and enough tokens so it does not silently truncate and fall
     # back to local rules.
-    planning_settings = ApiSettings.from_dict(settings.to_dict(include_secret=True))
-    planning_settings.timeout_seconds = max(settings.timeout_seconds, 120)
+    planning_settings = ApiSettings.from_dict(active_settings.to_dict(include_secret=True))
+    planning_settings.timeout_seconds = max(active_settings.timeout_seconds, 120)
     allowed = ", ".join(SUPPORTED_TYPES)
     request = {
         "用户需求": user_prompt,

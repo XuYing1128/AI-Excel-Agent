@@ -19,6 +19,7 @@ from ..domain_builders import (
     can_build_performance_compensation,
 )
 from ..io_utils import read_table
+from ..model_registry import get_role_api_settings, load_model_settings
 from ..task_paths import TaskPaths, append_run_log_event, stage_input_files
 from ..task_spec import TaskSpec, save_task_spec
 from ..template_adapter import (
@@ -115,6 +116,17 @@ def generate_from_task_spec(
         save_task_spec(task_spec, task_paths.task_spec_file)
 
         settings = api_settings or ApiSettings()
+        if not (settings.configured and settings.use_for_generation):
+            registry_settings = load_model_settings()
+            role_settings = get_role_api_settings(
+                "builder",
+                registry_settings,
+                use_for_intent=False,
+                use_for_review=False,
+                use_for_generation=registry_settings.agent_enabled,
+            )
+            if role_settings is not None:
+                settings = role_settings
         if settings.configured and settings.use_for_generation:
             return _generate_with_model(
                 task_spec, task_paths, settings, progress, notices

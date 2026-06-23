@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Any
 
 from ..api_settings import ApiSettings
+from ..model_registry import get_role_api_settings
 from ..task_paths import TaskPaths, append_run_log_event
 from ..task_spec import TaskSpec
 from .custom_api_service import chat_completion, parse_json_object
@@ -22,7 +23,16 @@ def run_subjective_review(
 ) -> dict[str, Any]:
     """Review only summaries; never send workbook rows or cell values."""
 
-    settings = api_settings or ApiSettings()
+    settings = (
+        api_settings
+        if api_settings is not None and api_settings.configured and api_settings.use_for_review
+        else get_role_api_settings(
+            "reviewer",
+            use_for_intent=False,
+            use_for_review=True,
+            use_for_generation=False,
+        )
+    ) or ApiSettings()
     if not settings.configured or not settings.use_for_review:
         result = _disabled_result(
             "建议审查未启用，不影响文件下载。",

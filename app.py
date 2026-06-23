@@ -25,6 +25,19 @@ from excel_agent.manifest import (
     build_manifest_record,
     recent_tasks,
 )
+from excel_agent.model_registry import (
+    ROLE_LABELS,
+    ROLE_NAMES,
+    ModelSettings,
+    ProviderConfig,
+    delete_model_settings,
+    from_legacy_api_settings,
+    get_provider,
+    load_model_settings,
+    save_model_settings,
+    safe_provider_id,
+    test_provider,
+)
 from excel_agent.preview import (
     combined_revision_prompt,
     sheet_preview_dataframe,
@@ -80,9 +93,11 @@ STATE_DEFAULTS: dict[str, Any] = {
     "validation_result": None,
     "subjective_review_result": None,
     "api_settings": None,
+    "model_settings": None,
     "api_message": "",
     "api_message_kind": "info",
     "api_edit_mode": False,
+    "provider_editor_open": False,
     "versions": [],
     "revision_request": "",
     "revision_output_name": "",
@@ -95,6 +110,8 @@ def initialize_state() -> None:
             st.session_state[key] = deepcopy(default)
     if st.session_state.api_settings is None:
         st.session_state.api_settings = load_api_settings()
+    if st.session_state.model_settings is None:
+        st.session_state.model_settings = load_model_settings()
 
 
 def inject_styles() -> None:
@@ -596,9 +613,15 @@ def run_generation_with_status(spec: TaskSpec, *, revision: bool = False) -> Non
 def render_settings_page() -> None:
     render_header("接口设置", "接口配置单独保存在这里，只有点击保存后才会生效。")
     settings: ApiSettings = st.session_state.api_settings
+    model_settings: ModelSettings = st.session_state.model_settings
+    role_provider = get_provider("builder", model_settings)
     with st.container(border=True):
         st.subheader("当前状态")
-        if settings.configured:
+        if role_provider:
+            st.success(
+                f"已启用：{role_provider.name} / {role_provider.model} / {mask_api_key(role_provider.api_key)}"
+            )
+        elif settings.configured:
             st.success(
                 f"已启用：{settings.provider_name} / {settings.model} / {mask_api_key(settings.api_key)}"
             )
@@ -666,7 +689,10 @@ def render_settings_page() -> None:
                     use_for_generation=use_generation,
                 )
                 save_api_settings(updated)
+                migrated = from_legacy_api_settings(updated) if updated.configured else ModelSettings()
+                save_model_settings(migrated)
                 st.session_state.api_settings = updated
+                st.session_state.model_settings = migrated
                 st.session_state.api_message = "设置已保存。"
                 st.session_state.api_message_kind = "success"
                 st.rerun()
@@ -698,6 +724,191 @@ def render_settings_page() -> None:
                 st.rerun()
 
     with st.container(border=True):
+        st.subheader("多模型与角色分工")
+        if not model_settings.providers:
+            st.info("还没有添加模型。可以先用上面的简单设置保存一个模型，也可以在这里添加多个模型。")
+        else:
+            rows = [
+                {
+                    "ID": item.id,
+                    "名称": item.name,
+                    "模型": item.model,
+                    "启用": "是" if item.enabled else "否",
+                    "状态": "可用" if item.configured else "未填完整",
+                }
+                for item in model_settings.providers
+            ]
+            st.dataframe(rows, use_container_width=True, hide_index=True)
+
+        with st.expander("添加或更新模型", expanded=not model_settings.providers):
+            provider_options = ["新建模型", *[item.id for item in model_settings.providers]]
+            selected_provider_id = st.selectbox(
+                "选择要编辑的模型",
+                provider_options,
+                key="provider_edit_target",
+            )
+            selected_provider = next(
+                (item for item in model_settings.providers if item.id == selected_provider_id),
+                ProviderConfig(),
+            )
+            with st.form("provider_settings_form"):
+                left, right = st.columns(2)
+                with left:
+                    provider_id = st.text_input(
+                        "模型 ID",
+                        value="" if selected_provider_id == "新建模型" else selected_provider.id,
+                        placeholder="例如 deepseek-chat",
+                    )
+                    provider_name = st.text_input(
+                        "显示名称",
+                        value="" if selected_provider_id == "新建模型" else selected_provider.name,
+                    )
+                    provider_base = st.text_input(
+                        "接口地址（模型）",
+                        value="" if selected_provider_id == "新建模型" else selected_provider.base_url,
+                        placeholder="例如：https://api.deepseek.com/v1",
+                    )
+                with right:
+                    provider_model = st.text_input(
+                        "模型名称（模型）",
+                        value="" if selected_provider_id == "新建模型" else selected_provider.model,
+                    )
+                    provider_key = st.text_input(
+                        "接口密钥（模型）",
+                        value="" if selected_provider_id == "新建模型" else selected_provider.api_key,
+                        type="password",
+                    )
+                    provider_timeout = st.number_input(
+                        "等待时间（模型，秒）",
+                        min_value=5,
+                        max_value=600,
+                        value=(
+                            120
+                            if selected_provider_id == "新建模型"
+                            else selected_provider.timeout_seconds
+                        ),
+                        step=5,
+                    )
+                    provider_enabled = st.checkbox(
+                        "启用这个模型",
+                        value=True if selected_provider_id == "新建模型" else selected_provider.enabled,
+                    )
+                save_provider = st.form_submit_button("保存这个模型", type="primary")
+            if save_provider:
+                normalized_id = safe_provider_id(provider_id or provider_name or provider_model)
+                updated_provider = ProviderConfig(
+                    id=normalized_id,
+                    name=provider_name or provider_model or "自定义模型",
+                    base_url=provider_base,
+                    api_key=provider_key,
+                    model=provider_model,
+                    timeout_seconds=provider_timeout,
+                    enabled=provider_enabled,
+                )
+                providers = [
+                    item for item in model_settings.providers if item.id != updated_provider.id
+                ]
+                providers.append(updated_provider)
+                roles = dict(model_settings.roles)
+                for role in ROLE_NAMES:
+                    roles.setdefault(role, updated_provider.id)
+                st.session_state.model_settings = ModelSettings(
+                    providers=providers,
+                    roles=roles,
+                    agent_enabled=model_settings.agent_enabled,
+                    run_python_enabled=model_settings.run_python_enabled,
+                )
+                save_model_settings(st.session_state.model_settings)
+                if updated_provider.configured:
+                    st.session_state.api_settings = updated_provider.to_api_settings()
+                    save_api_settings(st.session_state.api_settings)
+                st.success("模型设置已保存。")
+                st.rerun()
+
+        if model_settings.providers:
+            with st.form("model_roles_form"):
+                st.markdown("**角色指派**")
+                choices = [item.id for item in model_settings.providers]
+                role_values: dict[str, str] = {}
+                for role in ROLE_NAMES:
+                    current = model_settings.roles.get(role)
+                    default_index = choices.index(current) if current in choices else 0
+                    role_values[role] = st.selectbox(
+                        ROLE_LABELS.get(role, role),
+                        choices,
+                        index=default_index,
+                        key=f"role_select_{role}",
+                    )
+                agent_enabled = st.checkbox(
+                    "启用智能体编排",
+                    value=model_settings.agent_enabled,
+                    help="开启后，长尾需求会由多步流程选择本地工具生成；明确模板填充任务仍走快路径。",
+                )
+                run_python_enabled = st.checkbox(
+                    "允许安全脚本工具",
+                    value=model_settings.run_python_enabled,
+                    help="开启后，后续智能体可在任务临时目录中运行受限 Python 脚本。",
+                )
+                save_roles = st.form_submit_button("保存角色分工", type="primary")
+            if save_roles:
+                st.session_state.model_settings = ModelSettings(
+                    providers=model_settings.providers,
+                    roles=role_values,
+                    agent_enabled=agent_enabled,
+                    run_python_enabled=run_python_enabled,
+                )
+                save_model_settings(st.session_state.model_settings)
+                builder = get_provider("builder", st.session_state.model_settings)
+                if builder:
+                    st.session_state.api_settings = builder.to_api_settings()
+                    save_api_settings(st.session_state.api_settings)
+                st.success("角色分工已保存。")
+                st.rerun()
+
+            action_col, delete_col = st.columns(2)
+            test_id = action_col.selectbox(
+                "测试哪个模型",
+                [item.id for item in model_settings.providers],
+                key="provider_test_target",
+            )
+            if action_col.button("测试选中模型", width="stretch"):
+                candidate = next(item for item in model_settings.providers if item.id == test_id)
+                if not candidate.configured:
+                    st.warning("这个模型还没有填完整地址、密钥或模型名称。")
+                else:
+                    with st.spinner("正在测试连接……"):
+                        result = test_provider(candidate)
+                    if result.success:
+                        st.success("连接成功。")
+                    else:
+                        st.error(result.error or "连接失败。")
+
+            delete_id = delete_col.selectbox(
+                "删除哪个模型",
+                [item.id for item in model_settings.providers],
+                key="provider_delete_target",
+            )
+            if delete_col.button("删除选中模型", width="stretch"):
+                providers = [item for item in model_settings.providers if item.id != delete_id]
+                roles = {
+                    role: provider_id
+                    for role, provider_id in model_settings.roles.items()
+                    if provider_id != delete_id
+                }
+                if providers:
+                    for role in ROLE_NAMES:
+                        roles.setdefault(role, providers[0].id)
+                st.session_state.model_settings = ModelSettings(
+                    providers=providers,
+                    roles=roles,
+                    agent_enabled=model_settings.agent_enabled,
+                    run_python_enabled=model_settings.run_python_enabled,
+                )
+                save_model_settings(st.session_state.model_settings)
+                st.success("已删除选中模型。")
+                st.rerun()
+
+    with st.container(border=True):
         st.subheader("清除设置")
         with st.form("clear_api_settings_form"):
             confirm_clear = st.checkbox("我确认清除本机保存的接口设置")
@@ -707,7 +918,9 @@ def render_settings_page() -> None:
                 st.warning("请先勾选确认。")
             else:
                 delete_api_settings()
+                delete_model_settings()
                 st.session_state.api_settings = ApiSettings()
+                st.session_state.model_settings = ModelSettings()
                 st.session_state.api_edit_mode = False
                 st.success("接口设置已清除。")
 
