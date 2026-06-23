@@ -12,4 +12,4 @@ def isolate_private_settings(tmp_path, monkeypatch):
     private_dir = tmp_path / "private"
     monkeypatch.setenv("AI_EXCEL_API_SETTINGS_FILE", str(private_dir / "api_settings.json"))
     monkeypatch.setenv("AI_EXCEL_MODEL_SETTINGS_FILE", str(private_dir / "model_settings.json"))
-
+    monkeypatch.setenv("AI_EXCEL_MEMORY_DB", str(private_dir / "memory.db"))

@@ -25,6 +25,13 @@ from excel_agent.manifest import (
     build_manifest_record,
     recent_tasks,
 )
+from excel_agent.memory_store import (
+    clear_preferences,
+    learn_preferences_from_task,
+    list_preferences,
+    list_task_history,
+    record_task_history,
+)
 from excel_agent.model_registry import (
     ROLE_LABELS,
     ROLE_NAMES,
@@ -512,6 +519,16 @@ def execute_generation(
                 error=generation.error,
             )
         )
+        record_task_history(
+            task_id=task_paths.task_id,
+            prompt=spec.user_goal,
+            task_type=spec.task_type,
+            output_file=str(task_paths.output_file)
+            if task_paths.output_file.exists()
+            else None,
+            status=status,
+        )
+        learned_preferences = learn_preferences_from_task(spec, workbook_summary)
         st.session_state.task_spec = spec
         st.session_state.task_paths = task_paths
         generation_data = generation.to_dict()
@@ -519,6 +536,7 @@ def execute_generation(
             time.perf_counter() - started_at,
             1,
         )
+        generation_data["learned_preferences"] = learned_preferences
         st.session_state.generation_result = generation_data
         st.session_state.validation_result = validation.to_dict()
         st.session_state.subjective_review_result = subjective
@@ -909,6 +927,18 @@ def render_settings_page() -> None:
                 st.rerun()
 
     with st.container(border=True):
+        st.subheader("我的偏好")
+        preferences = list_preferences()
+        if preferences:
+            st.json(preferences, expanded=False)
+            if st.button("清空已学习偏好", width="stretch"):
+                clear_preferences()
+                st.success("已清空偏好。")
+                st.rerun()
+        else:
+            st.info("还没有学习到偏好。系统只保存低风险偏好，例如常用 sheet 语言、是否偏好图表或模板样式。")
+
+    with st.container(border=True):
         st.subheader("清除设置")
         with st.form("clear_api_settings_form"):
             confirm_clear = st.checkbox("我确认清除本机保存的接口设置")
@@ -990,7 +1020,14 @@ def render_history_page() -> None:
         "最近文件",
         "重新打开以前生成的表格，继续预览、查看报告或生成修改版。",
     )
-    items = recent_tasks(30)
+    memory_items = list_task_history(30)
+    manifest_items = recent_tasks(30)
+    merged: dict[str, dict[str, Any]] = {}
+    for item in [*manifest_items, *memory_items]:
+        task_id = str(item.get("task_id") or "")
+        if task_id and task_id not in merged:
+            merged[task_id] = item
+    items = list(merged.values())[:30]
     if not items:
         with st.container(border=True):
             st.info("还没有生成记录。")
