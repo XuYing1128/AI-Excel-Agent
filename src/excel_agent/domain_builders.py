@@ -451,7 +451,7 @@ def _add_global_sales_charts(
         if item
     ] or ["column"]
     helper = _write_global_sales_chart_sources(ws, details)
-    anchors = ["I3", "I20", "I37"]
+    anchors = ["N3", "N20", "N37"]
     for index, chart_type in enumerate(normalized_types[:3]):
         anchor = anchors[index]
         if chart_type in {"line", "area"}:
@@ -473,7 +473,7 @@ def _write_global_sales_chart_sources(
     ws,
     details: list[dict[str, Any]],
 ) -> dict[str, int]:
-    start_col = 9
+    start_col = 8
     region_header_row = 3
     region_start = region_header_row + 1
     ws.cell(2, start_col, "图表数据源（稳定数值，避免未重算导致空图）")
