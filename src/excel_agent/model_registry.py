@@ -15,6 +15,7 @@ from typing import Any, Literal
 
 from .api_settings import ApiSettings, api_settings_path, load_api_settings
 from .io_utils import project_root
+from .model_presets import normalize_base_url
 from .services.custom_api_service import (
     ApiCallResult,
     ToolChatResult,
@@ -48,7 +49,9 @@ class ProviderConfig:
     def __post_init__(self) -> None:
         self.id = safe_provider_id(self.id or self.name or self.model or "provider")
         self.name = str(self.name or "自定义模型").strip() or "自定义模型"
-        self.base_url = str(self.base_url or "").strip().rstrip("/")
+        # Clean the base URL so any console-pasted endpoint suffix
+        # (/chat/completions, /responses ...) is stripped to a tidy base.
+        self.base_url = normalize_base_url(self.base_url)
         self.api_key = str(self.api_key or "").strip()
         self.model = str(self.model or "").strip()
         self.timeout_seconds = min(max(int(self.timeout_seconds or 120), 5), 600)

@@ -75,6 +75,9 @@ def build_rich_workbook(
             plan,
             require_charts=require_charts and index == len(workbook_plan["sheets"]) - 1,
         )
+    # Recompute formulas on open so formula cells (and any chart that reads them)
+    # show real values in Excel/WPS instead of zeros before a manual recalc.
+    wb.calculation.fullCalcOnLoad = True
     wb.save(output_path)
     return output_path
 

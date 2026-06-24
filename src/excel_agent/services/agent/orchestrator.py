@@ -281,6 +281,10 @@ def _system_prompt(skills: list[dict[str, str]] | None = None) -> str:
         "你必须选择已提供的工具推进任务，常用顺序是生成/处理 → validate_workbook 检查 → finish_task 完成。"
         "所有计算列必须写 Excel 公式模板，并考虑 IFERROR、空值和除零。"
         "用户要求图表时必须在方案里包含 charts；用户给出的列、标题、分组、小计、总计优先。"
+        "图表 type 可选：column(竖向柱/对比) bar(横向条) line(趋势) area(面积) "
+        "pie(占比) doughnut(环形占比) radar(多维能力) scatter(相关性) combo(柱+线双轴)；"
+        "按用户用语选最合适的：占比/构成→pie，趋势/走势→line，对比/排名→column，"
+        "多维→radar，相关性→scatter，双指标→combo。每个 chart 要给 category_key 和 value_keys。"
         "不要复述全量数据，按已确认任务和文件摘要设计结构。"
     )
     if not skills:

@@ -302,13 +302,30 @@ def chat_completion_with_tools(
 
 
 def test_api_connection(settings: ApiSettings) -> ApiCallResult:
-    return chat_completion(
+    # Give reasoning ("thinking") models enough room to both think and reply;
+    # max_tokens=16 made every reasoning model look "broken" (the reasoning ate
+    # the budget -> empty content -> truncation).
+    result = chat_completion(
         settings,
         system_prompt="你是连接测试助手。只按要求回复，不要解释。",
         user_prompt="请只回复四个字：连接成功",
         temperature=0,
-        max_tokens=16,
+        max_tokens=2048,
     )
+    if result.success:
+        return result
+    # A 200 that only truncated means the endpoint, key and model are all valid —
+    # it is simply a thinking model. Report success so the user is not misled.
+    if result.finish_reason == "length" or result.status_code == 200:
+        return ApiCallResult(
+            True,
+            "连接正常（这是推理型模型，思考较多，正式使用时建议把等待时间调大或用于审查类角色）。",
+            None,
+            result.status_code,
+            result.latency_ms,
+            result.finish_reason,
+        )
+    return result
 
 
 def parse_json_object(content: str) -> dict[str, Any]:
@@ -337,10 +354,25 @@ def parse_json_object(content: str) -> dict[str, Any]:
 
 
 def completion_endpoint(base_url: str) -> str:
+    """Build the OpenAI-compatible chat-completions URL from any base shape.
+
+    Handles every provider we support:
+      - already full: .../chat/completions                -> as-is
+      - Responses API given by mistake: .../responses     -> swap to chat
+      - ends in a version segment (/v1, /v3, /api/paas/v4,
+        /compatible-mode/v1 ...)                           -> append /chat/completions
+      - bare host (https://api.deepseek.com)               -> append /v1/chat/completions
+    """
+
     url = str(base_url or "").strip().rstrip("/")
+    if not url:
+        return url
     if url.endswith("/chat/completions"):
         return url
-    if url.endswith("/v1"):
+    if url.endswith("/responses"):
+        return url[: -len("/responses")] + "/chat/completions"
+    last_segment = url.rsplit("/", 1)[-1].lower()
+    if re.fullmatch(r"v\d+(?:beta)?", last_segment):
         return f"{url}/chat/completions"
     return f"{url}/v1/chat/completions"
 

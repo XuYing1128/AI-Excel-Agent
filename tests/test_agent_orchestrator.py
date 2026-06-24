@@ -79,6 +79,65 @@ def test_agent_orchestrator_builds_workbook_with_mock_tools(tmp_path, monkeypatc
     assert blueprint_payload["title"] == "项目清单"
 
 
+def test_agent_orchestrator_builds_complex_chart(tmp_path, monkeypatch):
+    """The user's core need: the agent must reliably produce a real, non-empty
+    chart of the requested type via the robust rich-builder path."""
+    model_path = tmp_path / "model_settings.json"
+    _write_model_settings(model_path)
+    monkeypatch.setenv("AI_EXCEL_MODEL_SETTINGS_FILE", str(model_path))
+    blueprint = {
+        "title": "各区域季度销售对比",
+        "sheet_name": "对比",
+        "columns": [
+            {"key": "region", "label": "区域", "type": "text"},
+            {"key": "q1", "label": "一季度", "type": "money"},
+            {"key": "q2", "label": "二季度", "type": "money"},
+            {"key": "q3", "label": "三季度", "type": "money"},
+        ],
+        "records": [
+            {"region": "华东", "q1": 120, "q2": 150, "q3": 170},
+            {"region": "华南", "q1": 90, "q2": 95, "q3": 110},
+            {"region": "华北", "q1": 60, "q2": 70, "q3": 85},
+        ],
+        "charts": [
+            {"type": "column", "title": "区域季度对比", "category_key": "region",
+             "value_keys": ["q1", "q2", "q3"]}
+        ],
+    }
+
+    def fake_chat_with_tools(*args, **kwargs):
+        return ToolChatResult(
+            success=True,
+            content="",
+            tool_calls=[
+                ToolCall("call_build", "build_workbook", {"blueprint": blueprint}),
+                ToolCall("call_finish", "finish_task", {"summary": "完成"}),
+            ],
+            error=None,
+            status_code=200,
+            latency_ms=10,
+            message={"role": "assistant", "content": "", "tool_calls": []},
+        )
+
+    monkeypatch.setattr(orchestrator.model_registry, "chat_with_tools", fake_chat_with_tools)
+    paths = create_task_paths("sales_report", tmp_path / "tasks", output_name="对比.xlsx")
+    spec = TaskSpec(task_type="sales_report", user_goal="按区域对比各季度销售并出柱状图",
+                    output_name="对比.xlsx", include_charts=True)
+    result = orchestrator.run_agent(spec, paths, max_steps=3)
+
+    assert result.success is True
+    wb = load_workbook(paths.output_file)
+    ws = wb["对比"]
+    assert ws._charts, "agent output must contain a chart"
+    chart = ws._charts[0]
+    assert len(chart.series) == 3, "multi-series comparison chart"
+    # The chart must read literal values (helper sheet), not un-recalculated formulas.
+    helper = [name for name in wb.sheetnames if name.startswith("_图表")]
+    assert helper, "chart should use a literal-value helper sheet"
+    sample = wb[helper[0]].cell(2, 2).value
+    assert isinstance(sample, (int, float)), "chart data must be literal numbers"
+
+
 def test_agent_orchestrator_returns_failure_when_model_stalls(tmp_path, monkeypatch):
     model_path = tmp_path / "model_settings.json"
     _write_model_settings(model_path)

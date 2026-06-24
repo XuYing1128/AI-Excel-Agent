@@ -30,6 +30,10 @@ def add_bar_chart(
     chart.set_categories(cats)
     chart.height = 7
     chart.width = 12
+    # These charts reference summary cells that are Excel formulas. Force a full
+    # recalculation when the file is opened so Excel/WPS compute those values and
+    # the chart is not blank.
+    ws.parent.calculation.fullCalcOnLoad = True
     ws.add_chart(chart, anchor)
 
 
@@ -55,6 +59,10 @@ def add_line_chart(
     chart.set_categories(cats)
     chart.height = 7
     chart.width = 12
+    # These charts reference summary cells that are Excel formulas. Force a full
+    # recalculation when the file is opened so Excel/WPS compute those values and
+    # the chart is not blank.
+    ws.parent.calculation.fullCalcOnLoad = True
     ws.add_chart(chart, anchor)
 
 
@@ -77,5 +85,9 @@ def add_pie_chart(
     chart.set_categories(cats)
     chart.height = 7
     chart.width = 9
+    # These charts reference summary cells that are Excel formulas. Force a full
+    # recalculation when the file is opened so Excel/WPS compute those values and
+    # the chart is not blank.
+    ws.parent.calculation.fullCalcOnLoad = True
     ws.add_chart(chart, anchor)
 

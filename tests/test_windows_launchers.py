@@ -18,7 +18,9 @@ def test_start_script_has_no_hidden_powershell_or_download_behavior():
     ]
     assert all(token not in content for token in forbidden)
     assert ".venv\\scripts\\python.exe" in content
-    assert '".venv\\scripts\\python.exe" -m pip install --disable-pip-version-check -e .' in content
+    # The launcher now references the local python via an %APP_PY% variable, so
+    # assert the safe pip-install behaviour without pinning the exact inline path.
+    assert "-m pip install --disable-pip-version-check -e ." in content
     assert "-m streamlit run app.py" in content
     assert "--server.address 127.0.0.1" in content
     assert "--server.headless false" in content

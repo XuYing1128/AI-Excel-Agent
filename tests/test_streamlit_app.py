@@ -52,19 +52,19 @@ def test_streamlit_can_save_local_custom_api_settings(tmp_path, monkeypatch):
 
     next(button for button in app.button if button.label == "接口设置").click()
     app.run()
-    next(button for button in app.button if button.label == "编辑接口设置").click()
-    app.run()
-    next(item for item in app.text_input if item.label == "接口名称").input("测试模型")
-    next(item for item in app.text_input if item.label == "接口地址").input(
+    # 使用新的"添加模型"表单（旧的单模型编辑器已移除）。
+    next(item for item in app.text_input if item.label == "显示名称").input("测试模型")
+    next(item for item in app.text_input if item.label == "接口地址（模型）").input(
         "https://example.com/v1"
     )
-    next(item for item in app.text_input if item.label == "模型名称").input("model")
-    next(item for item in app.text_input if item.label == "接口密钥").input("secret")
-    next(item for item in app.checkbox if item.label == "启用这个接口").check()
-    next(button for button in app.button if button.label == "保存设置").click()
+    next(item for item in app.text_input if item.label == "模型名称（模型）").input("model")
+    next(item for item in app.text_input if item.label == "接口密钥（模型）").input("secret")
+    next(button for button in app.button if button.label == "保存这个模型").click()
     app.run()
 
     assert not app.exception
+    assert any("未测试" in item.value for item in app.markdown)
+    assert not any("可用" in item.value for item in app.markdown)
     saved = load_api_settings(settings_path)
     assert saved.configured is True
     assert saved.provider_name == "测试模型"

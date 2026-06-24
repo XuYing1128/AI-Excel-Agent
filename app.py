@@ -45,6 +45,11 @@ from excel_agent.model_registry import (
     safe_provider_id,
     test_provider,
 )
+from excel_agent.model_presets import (
+    PRESET_BY_KEY,
+    PROVIDER_PRESETS,
+    detect_provider_key,
+)
 from excel_agent.preview import (
     combined_revision_prompt,
     sheet_preview_dataframe,
@@ -105,6 +110,7 @@ STATE_DEFAULTS: dict[str, Any] = {
     "api_message_kind": "info",
     "api_edit_mode": False,
     "provider_editor_open": False,
+    "provider_test_results": {},
     "versions": [],
     "revision_request": "",
     "revision_output_name": "",
@@ -148,7 +154,7 @@ def inject_styles() -> None:
                 var(--canvas);
             color: var(--ink);
         }
-        .block-container { max-width: 1140px; padding-top: 1.1rem; padding-bottom: 4rem; }
+        .block-container { max-width: 1320px; padding-top: 1.1rem; padding-bottom: 4rem; padding-left: 2.4rem; padding-right: 2.4rem; }
         header[data-testid="stHeader"],
         [data-testid="stToolbar"], [data-testid="stDecoration"],
         [data-testid="stStatusWidget"],
@@ -628,135 +634,117 @@ def run_generation_with_status(spec: TaskSpec, *, revision: bool = False) -> Non
         execute_generation(spec, show_progress)
 
 
+def _persist_model_settings(updated: ModelSettings) -> None:
+    """Save multi-model settings and keep the legacy single-model mirror in sync."""
+    save_model_settings(updated)
+    st.session_state.model_settings = updated
+    builder = get_provider("builder", updated)
+    st.session_state.api_settings = builder.to_api_settings() if builder else ApiSettings()
+    if builder:
+        save_api_settings(st.session_state.api_settings)
+
+
+def _delete_provider_inline(provider_id: str) -> None:
+    current: ModelSettings = st.session_state.model_settings
+    providers = [item for item in current.providers if item.id != provider_id]
+    roles = {role: pid for role, pid in current.roles.items() if pid != provider_id}
+    st.session_state.provider_test_results.pop(provider_id, None)
+    if providers:
+        for role in ROLE_NAMES:
+            roles.setdefault(role, providers[0].id)
+    _persist_model_settings(
+        ModelSettings(
+            providers=providers,
+            roles=roles,
+            agent_enabled=current.agent_enabled,
+            run_python_enabled=current.run_python_enabled,
+        )
+    )
+
+
+def _provider_status_badge(provider: ProviderConfig) -> str:
+    """Return a UI status that does not confuse config completeness with reachability."""
+
+    if not provider.enabled:
+        return "⚪ 已停用"
+    if not provider.base_url or not provider.api_key or not provider.model:
+        return "🔴 未填完整"
+    result = st.session_state.provider_test_results.get(provider.id)
+    if not result:
+        return "🟡 未测试"
+    return "🟢 连接正常" if result.get("success") else "🔴 连接失败"
+
+
+def _remember_provider_test(provider: ProviderConfig, result) -> None:
+    st.session_state.provider_test_results[provider.id] = {
+        "success": bool(result.success),
+        "message": result.content if result.success else result.error,
+        "status_code": result.status_code,
+        "latency_ms": result.latency_ms,
+        "finish_reason": result.finish_reason,
+    }
+
+
 def render_settings_page() -> None:
-    render_header("接口设置", "接口配置单独保存在这里，只有点击保存后才会生效。")
-    settings: ApiSettings = st.session_state.api_settings
+    render_header("接口设置", "在这里配置你自己的大模型接口（密钥只存在本机，不会上传）。")
     model_settings: ModelSettings = st.session_state.model_settings
     role_provider = get_provider("builder", model_settings)
     with st.container(border=True):
-        st.subheader("当前状态")
         if role_provider:
-            st.success(
-                f"已启用：{role_provider.name} / {role_provider.model} / {mask_api_key(role_provider.api_key)}"
-            )
-        elif settings.configured:
-            st.success(
-                f"已启用：{settings.provider_name} / {settings.model} / {mask_api_key(settings.api_key)}"
+            st.info(
+                "当前主用模型："
+                f"{role_provider.name} · {role_provider.model} · {mask_api_key(role_provider.api_key)}"
+                f" · {_provider_status_badge(role_provider)}"
             )
         else:
-            st.info("当前使用本地规则。需要时可以配置兼容对话补全格式的接口。")
-        if st.button("编辑接口设置", width="content"):
-            st.session_state.api_edit_mode = not st.session_state.api_edit_mode
-            st.rerun()
-
-    if st.session_state.api_edit_mode:
-        with st.container(border=True):
-            st.subheader("编辑设置")
-            with st.form("api_settings_form"):
-                col_a, col_b = st.columns(2)
-                with col_a:
-                    provider = st.text_input("接口名称", value=settings.provider_name)
-                    base_url = st.text_input(
-                        "接口地址",
-                        value=settings.base_url,
-                        placeholder="例如：https://你的接口地址/v1",
-                    )
-                    model = st.text_input("模型名称", value=settings.model)
-                with col_b:
-                    api_key = st.text_input(
-                        "接口密钥",
-                        value=settings.api_key,
-                        type="password",
-                    )
-                    timeout = st.number_input(
-                        "等待时间（秒）",
-                        min_value=5,
-                        max_value=180,
-                        value=settings.timeout_seconds,
-                        step=5,
-                    )
-                    enabled = st.checkbox("启用这个接口", value=settings.enabled)
-                use_intent = st.checkbox(
-                    "用于理解需求",
-                    value=settings.use_for_intent,
-                )
-                use_review = st.checkbox(
-                    "用于审查生成结果",
-                    value=settings.use_for_review,
-                )
-                use_generation = st.checkbox(
-                    "由大模型调用本地工具生成表格",
-                    value=settings.use_for_generation,
-                    help="启用后，大模型会制定完整工作簿方案并调用本地 Excel 工具；失败时不会静默退回无关模板。",
-                )
-                save_clicked = st.form_submit_button(
-                    "保存设置",
-                    type="primary",
-                    width="stretch",
-                )
-            if save_clicked:
-                updated = ApiSettings(
-                    enabled=enabled,
-                    base_url=base_url,
-                    api_key=api_key,
-                    model=model,
-                    provider_name=provider,
-                    timeout_seconds=timeout,
-                    use_for_intent=use_intent,
-                    use_for_review=use_review,
-                    use_for_generation=use_generation,
-                )
-                save_api_settings(updated)
-                migrated = from_legacy_api_settings(updated) if updated.configured else ModelSettings()
-                save_model_settings(migrated)
-                st.session_state.api_settings = updated
-                st.session_state.model_settings = migrated
-                st.session_state.api_message = "设置已保存。"
-                st.session_state.api_message_kind = "success"
-                st.rerun()
-
-            test_col, cancel_col = st.columns(2)
-            if test_col.button("测试连接", width="stretch"):
-                candidate = ApiSettings(
-                    enabled=enabled,
-                    base_url=base_url,
-                    api_key=api_key,
-                    model=model,
-                    provider_name=provider,
-                    timeout_seconds=timeout,
-                    use_for_intent=use_intent,
-                    use_for_review=use_review,
-                    use_for_generation=use_generation,
-                )
-                if not candidate.configured:
-                    st.warning("请先填写地址、密钥和模型名称，并启用接口。")
-                else:
-                    with st.spinner("正在测试连接……"):
-                        result = test_api_connection(candidate)
-                    if result.success:
-                        st.success("连接成功。")
-                    else:
-                        st.error(result.error or "连接失败。")
-            if cancel_col.button("取消编辑", width="stretch"):
-                st.session_state.api_edit_mode = False
-                st.rerun()
+            st.info("还没有配置完整且启用的模型。未配置时会使用本地规则生成。")
 
     with st.container(border=True):
-        st.subheader("多模型与角色分工")
+        st.subheader("已配置的模型")
         if not model_settings.providers:
-            st.info("还没有添加模型。可以先用上面的简单设置保存一个模型，也可以在这里添加多个模型。")
+            st.info("还没有添加模型。在下面选好厂商、填入你的密钥即可。")
         else:
-            rows = [
-                {
-                    "ID": item.id,
-                    "名称": item.name,
-                    "模型": item.model,
-                    "启用": "是" if item.enabled else "否",
-                    "状态": "可用" if item.configured else "未填完整",
-                }
-                for item in model_settings.providers
-            ]
-            st.dataframe(rows, use_container_width=True, hide_index=True)
+            for item in model_settings.providers:
+                vendor = PRESET_BY_KEY[detect_provider_key(item.base_url)].name
+                roles_here = [
+                    ROLE_LABELS[role]
+                    for role in ROLE_NAMES
+                    if model_settings.roles.get(role) == item.id
+                ]
+                info_col, test_col, del_col = st.columns([6, 1.3, 1.3])
+                info_col.markdown(
+                    f"**{item.name}**　`{item.model}`　"
+                    + _provider_status_badge(item)
+                )
+                info_col.caption(
+                    f"{vendor} · {item.base_url}"
+                    + (f" · 角色：{'、'.join(roles_here)}" if roles_here else " · 暂未指派角色")
+                )
+                if test_col.button("测试连接", key=f"test_{item.id}", width="stretch"):
+                    if not item.configured:
+                        st.warning(f"「{item.name}」还没填完整地址、密钥或模型名称。")
+                    else:
+                        with st.spinner(f"正在测试 {item.name} ……"):
+                            result = test_provider(item)
+                        _remember_provider_test(item, result)
+                        if result.success:
+                            st.success(f"{item.name}：{result.content or '连接成功'}")
+                        else:
+                            st.error(f"{item.name} 连接失败：{result.error}")
+                if del_col.button("删除", key=f"del_{item.id}", width="stretch"):
+                    st.session_state.pending_delete_id = item.id
+                    st.rerun()
+                if st.session_state.get("pending_delete_id") == item.id:
+                    st.warning(f"确定删除「{item.name}」吗？删除后它的角色会自动改到其它模型。")
+                    yes_col, no_col, _ = st.columns([1, 1, 4])
+                    if yes_col.button("确定删除", key=f"delyes_{item.id}", type="primary", width="stretch"):
+                        _delete_provider_inline(item.id)
+                        st.session_state.pending_delete_id = None
+                        st.rerun()
+                    if no_col.button("取消", key=f"delno_{item.id}", width="stretch"):
+                        st.session_state.pending_delete_id = None
+                        st.rerun()
+                st.divider()
 
         with st.expander("添加或更新模型", expanded=not model_settings.providers):
             provider_options = ["新建模型", *[item.id for item in model_settings.providers]]
@@ -769,27 +757,54 @@ def render_settings_page() -> None:
                 (item for item in model_settings.providers if item.id == selected_provider_id),
                 ProviderConfig(),
             )
+            is_new_provider = selected_provider_id == "新建模型"
+            # 厂商预设（放在表单外，选中后立即把正确的接口地址预填进表单）。
+            preset_keys = [item.key for item in PROVIDER_PRESETS]
+            default_preset = (
+                "custom" if is_new_provider else detect_provider_key(selected_provider.base_url)
+            )
+            preset_key = st.selectbox(
+                "厂商预设（自动填好正确的接口地址，避免填错）",
+                preset_keys,
+                index=preset_keys.index(default_preset),
+                format_func=lambda key: PRESET_BY_KEY[key].name,
+                # Key includes the edited model so switching models refreshes the
+                # preset to that model's detected vendor (instead of getting stuck).
+                key=f"provider_preset_{selected_provider_id}",
+            )
+            preset = PRESET_BY_KEY[preset_key]
+            if preset.note or preset.model_examples:
+                hint = "ℹ️ " + preset.note
+                if preset.model_examples:
+                    hint += "　模型名示例：" + "、".join(preset.model_examples)
+                st.caption(hint)
+            base_default = preset.base_url if is_new_provider else selected_provider.base_url
+            name_default = preset.name if is_new_provider else selected_provider.name
+            model_placeholder = (
+                preset.model_examples[0] if preset.model_examples else "例如 deepseek-chat"
+            )
             with st.form("provider_settings_form"):
                 left, right = st.columns(2)
                 with left:
                     provider_id = st.text_input(
                         "模型 ID",
-                        value="" if selected_provider_id == "新建模型" else selected_provider.id,
+                        value="" if is_new_provider else selected_provider.id,
                         placeholder="例如 deepseek-chat",
                     )
                     provider_name = st.text_input(
                         "显示名称",
-                        value="" if selected_provider_id == "新建模型" else selected_provider.name,
+                        value=name_default,
                     )
                     provider_base = st.text_input(
                         "接口地址（模型）",
-                        value="" if selected_provider_id == "新建模型" else selected_provider.base_url,
+                        value=base_default,
                         placeholder="例如：https://api.deepseek.com/v1",
                     )
                 with right:
                     provider_model = st.text_input(
                         "模型名称（模型）",
-                        value="" if selected_provider_id == "新建模型" else selected_provider.model,
+                        value="" if is_new_provider else selected_provider.model,
+                        placeholder=model_placeholder,
                     )
                     provider_key = st.text_input(
                         "接口密钥（模型）",
@@ -837,6 +852,7 @@ def render_settings_page() -> None:
                     run_python_enabled=model_settings.run_python_enabled,
                 )
                 save_model_settings(st.session_state.model_settings)
+                st.session_state.provider_test_results.pop(updated_provider.id, None)
                 if updated_provider.configured:
                     st.session_state.api_settings = updated_provider.to_api_settings()
                     save_api_settings(st.session_state.api_settings)
@@ -881,49 +897,6 @@ def render_settings_page() -> None:
                     st.session_state.api_settings = builder.to_api_settings()
                     save_api_settings(st.session_state.api_settings)
                 st.success("角色分工已保存。")
-                st.rerun()
-
-            action_col, delete_col = st.columns(2)
-            test_id = action_col.selectbox(
-                "测试哪个模型",
-                [item.id for item in model_settings.providers],
-                key="provider_test_target",
-            )
-            if action_col.button("测试选中模型", width="stretch"):
-                candidate = next(item for item in model_settings.providers if item.id == test_id)
-                if not candidate.configured:
-                    st.warning("这个模型还没有填完整地址、密钥或模型名称。")
-                else:
-                    with st.spinner("正在测试连接……"):
-                        result = test_provider(candidate)
-                    if result.success:
-                        st.success("连接成功。")
-                    else:
-                        st.error(result.error or "连接失败。")
-
-            delete_id = delete_col.selectbox(
-                "删除哪个模型",
-                [item.id for item in model_settings.providers],
-                key="provider_delete_target",
-            )
-            if delete_col.button("删除选中模型", width="stretch"):
-                providers = [item for item in model_settings.providers if item.id != delete_id]
-                roles = {
-                    role: provider_id
-                    for role, provider_id in model_settings.roles.items()
-                    if provider_id != delete_id
-                }
-                if providers:
-                    for role in ROLE_NAMES:
-                        roles.setdefault(role, providers[0].id)
-                st.session_state.model_settings = ModelSettings(
-                    providers=providers,
-                    roles=roles,
-                    agent_enabled=model_settings.agent_enabled,
-                    run_python_enabled=model_settings.run_python_enabled,
-                )
-                save_model_settings(st.session_state.model_settings)
-                st.success("已删除选中模型。")
                 st.rerun()
 
     with st.container(border=True):
