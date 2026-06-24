@@ -7,7 +7,17 @@ from pathlib import Path
 from typing import Any
 
 from openpyxl import Workbook
-from openpyxl.chart import BarChart, Reference
+from openpyxl.chart import (
+    AreaChart,
+    BarChart,
+    DoughnutChart,
+    LineChart,
+    PieChart,
+    RadarChart,
+    Reference,
+    ScatterChart,
+    Series,
+)
 from openpyxl.formatting.rule import FormulaRule
 from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
 from openpyxl.utils import get_column_letter
@@ -113,6 +123,9 @@ def build_global_sales_analysis_workbook(
     plan: dict[str, Any],
     prompt: str,
     output: str | Path,
+    *,
+    include_charts: bool = False,
+    chart_types: list[str] | None = None,
 ) -> Path:
     """Build the requested 5-sheet sales workbook with formulas and styling.
 
@@ -135,7 +148,10 @@ def build_global_sales_analysis_workbook(
     detail_bounds = _write_sales_detail_sheet(wb.create_sheet("明细"), details)
     _write_sales_region_summary(wb.create_sheet("地区汇总"), details, detail_bounds)
     _write_sales_product_summary(wb.create_sheet("产品汇总"), details, detail_bounds)
-    _write_sales_cross_summary(wb.create_sheet("交叉汇总"), detail_bounds)
+    cross_ws = wb.create_sheet("交叉汇总")
+    _write_sales_cross_summary(cross_ws, detail_bounds)
+    if include_charts:
+        _add_global_sales_charts(cross_ws, details, chart_types or ["column"])
     wb.save(output_path)
     return output_path
 
@@ -212,6 +228,10 @@ def _extract_sales_detail_records(prompt: str) -> list[dict[str, Any]]:
 def _write_sales_target_sheet(ws, targets: list[dict[str, Any]]) -> None:
     headers = ["地区", "产品", "月度销售目标(元)"]
     _setup_title(ws, "各区域产品月度销售目标（元）", 1, len(headers))
+    ws["A2"] = "使用说明：参数表为输入基准；明细、汇总和交叉汇总通过 Excel 公式联动。"
+    ws.merge_cells("A2:C2")
+    ws["A2"].font = Font(name="Microsoft YaHei", italic=True, color="666666")
+    ws["A2"].alignment = Alignment(horizontal="left", vertical="center")
     for col, header in enumerate(headers, start=1):
         _style_header(ws.cell(3, col, header))
     _style_header(ws.cell(3, 4, "匹配键"))
@@ -411,6 +431,301 @@ def _write_sales_cross_summary(ws, bounds: dict[str, int]) -> None:
                 ws.cell(row, col).font = Font(name="Microsoft YaHei", bold=True)
     ws.freeze_panes = "B5"
     _finish_sales_sheet(ws, 7)
+
+
+def _add_global_sales_charts(
+    ws,
+    details: list[dict[str, Any]],
+    chart_types: list[str],
+) -> None:
+    """Add stable, non-empty charts based on helper values.
+
+    The helper data is intentionally written as static values in the same sheet:
+    WPS and web Office sometimes show blank charts when the chart only points to
+    formulas that have not been recalculated yet.
+    """
+
+    normalized_types = [
+        item
+        for item in dict.fromkeys(str(chart_type or "column").lower() for chart_type in chart_types)
+        if item
+    ] or ["column"]
+    helper = _write_global_sales_chart_sources(ws, details)
+    anchors = ["I3", "I20", "I37"]
+    for index, chart_type in enumerate(normalized_types[:3]):
+        anchor = anchors[index]
+        if chart_type in {"line", "area"}:
+            chart = _build_monthly_sales_chart(ws, helper, chart_type)
+        elif chart_type in {"pie", "doughnut"}:
+            chart = _build_region_share_chart(ws, helper, chart_type)
+        elif chart_type == "scatter":
+            chart = _build_sales_profit_scatter(ws, helper)
+        elif chart_type == "radar":
+            chart = _build_region_radar_chart(ws, helper)
+        elif chart_type == "combo":
+            chart = _build_sales_combo_chart(ws, helper)
+        else:
+            chart = _build_region_comparison_chart(ws, helper, chart_type)
+        ws.add_chart(chart, anchor)
+
+
+def _write_global_sales_chart_sources(
+    ws,
+    details: list[dict[str, Any]],
+) -> dict[str, int]:
+    start_col = 9
+    region_header_row = 3
+    region_start = region_header_row + 1
+    ws.cell(2, start_col, "图表数据源（稳定数值，避免未重算导致空图）")
+    ws.merge_cells(
+        start_row=2,
+        start_column=start_col,
+        end_row=2,
+        end_column=start_col + 4,
+    )
+    _style_section_title(ws.cell(2, start_col))
+    for offset, header in enumerate(["地区", "总销售额(元)", "总利润(元)", "销售占比", "平均利润率"]):
+        _style_header(ws.cell(region_header_row, start_col + offset, header))
+    total_sales = sum(_number(item.get("销售额(元)")) for item in details) or 1
+    for row_offset, region in enumerate(REGION_ORDER):
+        row = region_start + row_offset
+        sales = _sum_details(details, "地区", region, "销售额(元)")
+        profit = _sum_details(details, "地区", region, "利润(元)")
+        values = [
+            region,
+            sales,
+            profit,
+            sales / total_sales if total_sales else 0,
+            profit / sales if sales else 0,
+        ]
+        for offset, value in enumerate(values):
+            cell = ws.cell(row, start_col + offset, value)
+            _style_body_cell(cell, FORMULA_FILL if offset else INPUT_FILL)
+        for col in (start_col + 1, start_col + 2):
+            ws.cell(row, col).number_format = "#,##0"
+        for col in (start_col + 3, start_col + 4):
+            ws.cell(row, col).number_format = "0.0%"
+
+    month_header_row = region_start + len(REGION_ORDER) + 3
+    month_start = month_header_row + 1
+    ws.cell(month_header_row - 1, start_col, "月度趋势数据源")
+    ws.merge_cells(
+        start_row=month_header_row - 1,
+        start_column=start_col,
+        end_row=month_header_row - 1,
+        end_column=start_col + 2,
+    )
+    _style_section_title(ws.cell(month_header_row - 1, start_col))
+    for offset, header in enumerate(["月份", "销售额(元)", "利润(元)"]):
+        _style_header(ws.cell(month_header_row, start_col + offset, header))
+    for row_offset, month in enumerate(MONTHS):
+        row = month_start + row_offset
+        sales = sum(
+            _number(item.get("销售额(元)")) for item in details if item.get("月份") == month
+        )
+        profit = sum(
+            _number(item.get("利润(元)")) for item in details if item.get("月份") == month
+        )
+        for offset, value in enumerate([month, sales, profit]):
+            cell = ws.cell(row, start_col + offset, value)
+            _style_body_cell(cell, FORMULA_FILL if offset else INPUT_FILL)
+        ws.cell(row, start_col + 1).number_format = "#,##0"
+        ws.cell(row, start_col + 2).number_format = "#,##0"
+
+    for col in range(start_col, start_col + 5):
+        ws.column_dimensions[get_column_letter(col)].width = 16
+    return {
+        "region_header_row": region_header_row,
+        "region_start": region_start,
+        "region_end": region_start + len(REGION_ORDER) - 1,
+        "month_header_row": month_header_row,
+        "month_start": month_start,
+        "month_end": month_start + len(MONTHS) - 1,
+        "start_col": start_col,
+    }
+
+
+def _build_region_comparison_chart(ws, helper: dict[str, int], chart_type: str):
+    start_col = helper["start_col"]
+    chart = BarChart()
+    chart.type = "bar" if chart_type == "bar" else "col"
+    chart.grouping = "clustered"
+    chart.overlap = -10
+    chart.gapWidth = 80
+    chart.style = 10
+    chart.title = "各地区销售额与利润对比"
+    chart.height = 8
+    chart.width = 16
+    chart.add_data(
+        Reference(
+            ws,
+            min_col=start_col + 1,
+            max_col=start_col + 2,
+            min_row=helper["region_header_row"],
+            max_row=helper["region_end"],
+        ),
+        titles_from_data=True,
+    )
+    chart.set_categories(
+        Reference(
+            ws,
+            min_col=start_col,
+            min_row=helper["region_start"],
+            max_row=helper["region_end"],
+        )
+    )
+    chart.y_axis.title = "金额（元）"
+    chart.x_axis.title = "地区"
+    chart.y_axis.numFmt = "#,##0"
+    return chart
+
+
+def _build_monthly_sales_chart(ws, helper: dict[str, int], chart_type: str):
+    start_col = helper["start_col"]
+    chart = AreaChart() if chart_type == "area" else LineChart()
+    chart.title = "月度销售额与利润趋势"
+    chart.style = 13
+    chart.height = 8
+    chart.width = 16
+    chart.add_data(
+        Reference(
+            ws,
+            min_col=start_col + 1,
+            max_col=start_col + 2,
+            min_row=helper["month_header_row"],
+            max_row=helper["month_end"],
+        ),
+        titles_from_data=True,
+    )
+    chart.set_categories(
+        Reference(
+            ws,
+            min_col=start_col,
+            min_row=helper["month_start"],
+            max_row=helper["month_end"],
+        )
+    )
+    chart.y_axis.title = "金额（元）"
+    chart.x_axis.title = "月份"
+    chart.y_axis.numFmt = "#,##0"
+    return chart
+
+
+def _build_region_share_chart(ws, helper: dict[str, int], chart_type: str):
+    start_col = helper["start_col"]
+    chart = DoughnutChart() if chart_type == "doughnut" else PieChart()
+    chart.title = "各地区销售额占比"
+    chart.height = 8
+    chart.width = 12
+    chart.add_data(
+        Reference(
+            ws,
+            min_col=start_col + 3,
+            min_row=helper["region_header_row"],
+            max_row=helper["region_end"],
+        ),
+        titles_from_data=True,
+    )
+    chart.set_categories(
+        Reference(
+            ws,
+            min_col=start_col,
+            min_row=helper["region_start"],
+            max_row=helper["region_end"],
+        )
+    )
+    return chart
+
+
+def _build_sales_profit_scatter(ws, helper: dict[str, int]):
+    start_col = helper["start_col"]
+    chart = ScatterChart()
+    chart.title = "销售额与利润相关性"
+    chart.height = 8
+    chart.width = 14
+    chart.x_axis.title = "销售额（元）"
+    chart.y_axis.title = "利润（元）"
+    xvalues = Reference(
+        ws,
+        min_col=start_col + 1,
+        min_row=helper["region_start"],
+        max_row=helper["region_end"],
+    )
+    yvalues = Reference(
+        ws,
+        min_col=start_col + 2,
+        min_row=helper["region_start"],
+        max_row=helper["region_end"],
+    )
+    chart.series.append(Series(yvalues, xvalues, title="地区"))
+    return chart
+
+
+def _build_region_radar_chart(ws, helper: dict[str, int]):
+    start_col = helper["start_col"]
+    chart = RadarChart()
+    chart.title = "地区销售与利润雷达图"
+    chart.height = 8
+    chart.width = 14
+    chart.add_data(
+        Reference(
+            ws,
+            min_col=start_col + 1,
+            max_col=start_col + 2,
+            min_row=helper["region_header_row"],
+            max_row=helper["region_end"],
+        ),
+        titles_from_data=True,
+    )
+    chart.set_categories(
+        Reference(
+            ws,
+            min_col=start_col,
+            min_row=helper["region_start"],
+            max_row=helper["region_end"],
+        )
+    )
+    return chart
+
+
+def _build_sales_combo_chart(ws, helper: dict[str, int]):
+    start_col = helper["start_col"]
+    chart = BarChart()
+    chart.type = "col"
+    chart.title = "销售额柱线组合图"
+    chart.style = 10
+    chart.height = 8
+    chart.width = 16
+    chart.add_data(
+        Reference(
+            ws,
+            min_col=start_col + 1,
+            min_row=helper["month_header_row"],
+            max_row=helper["month_end"],
+        ),
+        titles_from_data=True,
+    )
+    chart.set_categories(
+        Reference(
+            ws,
+            min_col=start_col,
+            min_row=helper["month_start"],
+            max_row=helper["month_end"],
+        )
+    )
+    line = LineChart()
+    line.add_data(
+        Reference(
+            ws,
+            min_col=start_col + 2,
+            min_row=helper["month_header_row"],
+            max_row=helper["month_end"],
+        ),
+        titles_from_data=True,
+    )
+    chart += line
+    chart.y_axis.title = "金额（元）"
+    return chart
 
 
 def _setup_title(ws, title: str, start_col: int, end_col: int) -> None:

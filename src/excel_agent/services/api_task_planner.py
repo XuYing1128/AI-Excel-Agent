@@ -6,6 +6,7 @@ import json
 from dataclasses import dataclass
 
 from ..api_settings import ApiSettings
+from ..chart_spec import analyze_chart_requirements, normalize_chart_types
 from ..content_plan import merge_model_content_plan, suggest_output_name
 from ..intent_classifier import SUPPORTED_TYPES
 from ..model_registry import get_role_api_settings
@@ -123,11 +124,31 @@ def _merge_payload(draft: TaskSpecDraft, payload: dict) -> None:
     summary = str(payload.get("goal_summary", "")).strip()
     if summary:
         draft.task_spec.options["model_goal_summary"] = summary
+    chart_explicit = bool(
+        draft.task_spec.options.get("chart_requested_explicitly")
+        or (draft.task_spec.options.get("chart_requirements") or {}).get("required")
+    )
     if isinstance(payload.get("include_charts"), bool):
-        if payload["include_charts"] is False:
+        if payload["include_charts"] is False and not chart_explicit:
             draft.task_spec.include_charts = False
-        elif draft.task_spec.options.get("chart_requested_explicitly"):
+        elif payload["include_charts"] is True:
             draft.task_spec.include_charts = True
+            chart_types = normalize_chart_types(
+                (payload.get("content_plan") or {}).get("chart_types")
+                if isinstance(payload.get("content_plan"), dict)
+                else None
+            )
+            chart_req = analyze_chart_requirements(
+                draft.task_spec.user_goal,
+                force_include=chart_explicit,
+                requested_types=chart_types
+                or draft.task_spec.options.get("chart_types"),
+            )
+            draft.task_spec.options["chart_requested_explicitly"] = bool(
+                chart_req.get("required")
+            )
+            draft.task_spec.options["chart_requirements"] = chart_req
+            draft.task_spec.options["chart_types"] = list(chart_req.get("types") or [])
     if isinstance(payload.get("include_summary"), bool):
         if payload["include_summary"] is False:
             draft.task_spec.include_summary = False

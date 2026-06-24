@@ -59,6 +59,7 @@ def validate_workbook(path: str | Path, output_json: str | Path | None = None) -
     summary["workbook_opened"] = True
     summary["sheet_count"] = len(wb.worksheets)
     summary["visible_sheet_count"] = sum(1 for ws in wb.worksheets if ws.sheet_state == "visible")
+    summary["chart_count"] = sum(len(ws._charts) for ws in wb.worksheets)
     summary["sheets"] = [
         {
             "name": ws.title,
@@ -67,6 +68,7 @@ def validate_workbook(path: str | Path, output_json: str | Path | None = None) -
             "max_column": ws.max_column,
             "auto_filter": ws.auto_filter.ref,
             "freeze_panes": str(ws.freeze_panes) if ws.freeze_panes else None,
+            "chart_count": len(ws._charts),
         }
         for ws in wb.worksheets
     ]

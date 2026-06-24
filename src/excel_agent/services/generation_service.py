@@ -9,6 +9,7 @@ from typing import Any, Callable
 from openpyxl import load_workbook
 
 from ..api_settings import ApiSettings
+from ..chart_spec import analyze_chart_requirements
 from ..custom_workbook_builder import (
     build_custom_workbook,
     build_dataset_workbook,
@@ -354,13 +355,17 @@ def _local_generate(
     ):
         mode = "domain_compiler:global_sales_analysis"
         used_command = "excel_agent.domain_builders.build_global_sales_analysis_workbook"
+        chart_requirements = _chart_requirements_from_task(task_spec)
+        task_spec.include_charts = bool(chart_requirements.get("required"))
+        task_spec.options["chart_requirements"] = chart_requirements
+        task_spec.options["chart_types"] = list(chart_requirements.get("types") or [])
         build_global_sales_analysis_workbook(
             content_plan,
             task_spec.user_goal,
             task_paths.output_file,
+            include_charts=task_spec.include_charts,
+            chart_types=list(chart_requirements.get("types") or []),
         )
-        if not _explicit_chart_request(task_spec.user_goal):
-            task_spec.include_charts = False
         content_plan["expected_sheet_names"] = [
             "参数表",
             "明细",
@@ -372,9 +377,15 @@ def _local_generate(
         content_plan["explicit_structure"] = True
         task_spec.options["content_plan"] = content_plan
         save_task_spec(task_spec, task_paths.task_spec_file)
+        chart_notice = (
+            f"并按需求添加了 {', '.join(chart_requirements.get('types') or ['column'])} 图表。"
+            if task_spec.include_charts
+            else "本次需求未明确要求图表，未额外添加。"
+        )
         notices.append(
             "已使用本地销售分析业务编译器生成 5 个工作表、72 行明细、"
-            "跨表公式、地区/产品汇总和交叉汇总；未退化为通用模板。"
+            f"跨表公式、地区/产品汇总和交叉汇总；{chart_notice}"
+            "未退化为通用模板。"
         )
     elif (
         inline_tables
@@ -471,21 +482,22 @@ def _local_generate(
 
 
 def _explicit_chart_request(prompt: str) -> bool:
-    text = str(prompt or "").lower()
-    if "纯表格" in text and "图表" not in text:
-        return False
-    return any(
-        word in text
-        for word in (
-            "图表",
-            "趋势图",
-            "柱状图",
-            "折线图",
-            "饼图",
-            "环形图",
-            "dashboard",
-            "看板",
-        )
+    return bool(analyze_chart_requirements(prompt).get("required"))
+
+
+def _chart_requirements_from_task(task_spec: TaskSpec) -> dict[str, Any]:
+    existing = task_spec.options.get("chart_requirements")
+    requested_types = task_spec.options.get("chart_types")
+    if isinstance(existing, dict):
+        requested_types = requested_types or existing.get("types")
+    return analyze_chart_requirements(
+        task_spec.user_goal,
+        force_include=bool(
+            task_spec.include_charts
+            or task_spec.options.get("chart_requested_explicitly")
+            or (isinstance(existing, dict) and existing.get("required"))
+        ),
+        requested_types=requested_types,
     )
 
 

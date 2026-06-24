@@ -23,6 +23,22 @@ def test_task_spec_draft_and_roundtrip(tmp_path):
     assert loaded.to_dict() == draft.task_spec.to_dict()
 
 
+def test_chart_requirement_distinguishes_pivot_table_from_pivot_chart():
+    table_only = build_task_spec_draft(
+        "2026年销售分析，纯表格，包含数据透视表布局。",
+        [],
+    ).task_spec
+    assert table_only.include_charts is False
+    assert table_only.options["chart_requirements"]["required"] is False
+
+    with_chart = build_task_spec_draft(
+        "2026年销售分析，需要数据透视图表和柱状对比图。",
+        [],
+    ).task_spec
+    assert with_chart.include_charts is True
+    assert "column" in with_chart.options["chart_types"]
+
+
 def test_task_spec_requires_at_most_one_clarification_round():
     draft = build_task_spec_draft("做个表格", [])
     assert 1 <= len(draft.clarifying_questions) <= 5

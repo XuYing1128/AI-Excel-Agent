@@ -75,3 +75,23 @@ def test_global_sales_prompt_uses_domain_compiler(tmp_path, monkeypatch):
     assert wb["明细"]["F4"].value == "=IFERROR(E4/D4,0)"
     assert "INDEX" in wb["明细"]["G4"].value
     assert wb["交叉汇总"]["B5"].value.startswith("=SUMIFS(")
+
+
+def test_global_sales_compiler_adds_requested_chart(tmp_path, monkeypatch):
+    monkeypatch.setenv("AI_EXCEL_OUTPUTS_DIR", str(tmp_path / "outputs"))
+    prompt = GLOBAL_SALES_PROMPT + "\n请增加柱状对比图，展示各地区销售额和利润。"
+    draft = build_task_spec_draft(prompt, [])
+    spec = draft.task_spec
+    spec.output_name = "全球销售分析_带图表.xlsx"
+    paths = create_task_paths(
+        spec.task_type,
+        tmp_path / "outputs" / "tasks",
+        output_name=spec.output_name,
+    )
+
+    result = generate_from_task_spec(spec, paths)
+
+    assert result.success is True
+    wb = load_workbook(paths.output_file, data_only=False)
+    assert sum(len(ws._charts) for ws in wb.worksheets) >= 1
+    assert wb["交叉汇总"]._charts[0].title is not None
