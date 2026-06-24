@@ -15,7 +15,9 @@ from ..custom_workbook_builder import (
     build_inline_tables_workbook,
 )
 from ..domain_builders import (
+    build_global_sales_analysis_workbook,
     build_performance_compensation_workbook,
+    can_build_global_sales_analysis,
     can_build_performance_compensation,
 )
 from ..io_utils import read_table
@@ -348,6 +350,35 @@ def _local_generate(
     if (
         inline_tables
         and not task_spec.input_files
+        and can_build_global_sales_analysis(task_spec.user_goal, content_plan)
+    ):
+        mode = "domain_compiler:global_sales_analysis"
+        used_command = "excel_agent.domain_builders.build_global_sales_analysis_workbook"
+        build_global_sales_analysis_workbook(
+            content_plan,
+            task_spec.user_goal,
+            task_paths.output_file,
+        )
+        if not _explicit_chart_request(task_spec.user_goal):
+            task_spec.include_charts = False
+        content_plan["expected_sheet_names"] = [
+            "参数表",
+            "明细",
+            "地区汇总",
+            "产品汇总",
+            "交叉汇总",
+        ]
+        content_plan["consolidated_inline_tables"] = True
+        content_plan["explicit_structure"] = True
+        task_spec.options["content_plan"] = content_plan
+        save_task_spec(task_spec, task_paths.task_spec_file)
+        notices.append(
+            "已使用本地销售分析业务编译器生成 5 个工作表、72 行明细、"
+            "跨表公式、地区/产品汇总和交叉汇总；未退化为通用模板。"
+        )
+    elif (
+        inline_tables
+        and not task_spec.input_files
         and can_build_performance_compensation(task_spec.user_goal, content_plan)
     ):
         mode = "domain_compiler:performance_compensation"
@@ -437,6 +468,25 @@ def _local_generate(
         details=result.to_dict(),
     )
     return result
+
+
+def _explicit_chart_request(prompt: str) -> bool:
+    text = str(prompt or "").lower()
+    if "纯表格" in text and "图表" not in text:
+        return False
+    return any(
+        word in text
+        for word in (
+            "图表",
+            "趋势图",
+            "柱状图",
+            "折线图",
+            "饼图",
+            "环形图",
+            "dashboard",
+            "看板",
+        )
+    )
 
 
 def _wrap_result(

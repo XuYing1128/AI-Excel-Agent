@@ -24,16 +24,19 @@ def run_subjective_review(
 ) -> dict[str, Any]:
     """Review only summaries; never send workbook rows or cell values."""
 
+    reviewer_settings = get_role_api_settings(
+        "reviewer",
+        use_for_intent=False,
+        use_for_review=True,
+        use_for_generation=False,
+    )
     settings = (
-        api_settings
+        reviewer_settings
+        if reviewer_settings is not None and reviewer_settings.configured and reviewer_settings.use_for_review
+        else api_settings
         if api_settings is not None and api_settings.configured and api_settings.use_for_review
-        else get_role_api_settings(
-            "reviewer",
-            use_for_intent=False,
-            use_for_review=True,
-            use_for_generation=False,
-        )
-    ) or ApiSettings()
+        else ApiSettings()
+    )
     if not settings.configured or not settings.use_for_review:
         result = _disabled_result(
             "建议审查未启用，不影响文件下载。",

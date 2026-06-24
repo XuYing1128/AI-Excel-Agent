@@ -86,7 +86,7 @@ def chat_completion(
         "Accept": "application/json",
     }
     try:
-        response = requests.post(
+        response = _post_json(
             endpoint,
             headers=headers,
             json=payload,
@@ -99,7 +99,7 @@ def chat_completion(
     if not response.ok and json_mode and response.status_code in {400, 404, 422}:
         payload.pop("response_format", None)
         try:
-            response = requests.post(
+            response = _post_json(
                 endpoint,
                 headers=headers,
                 json=payload,
@@ -180,7 +180,7 @@ def chat_completion_with_tools(
     last_finish_reason = ""
     for attempt in range(3):
         try:
-            response = requests.post(
+            response = _post_json(
                 endpoint,
                 headers=headers,
                 json=payload,
@@ -326,6 +326,35 @@ def test_api_connection(settings: ApiSettings) -> ApiCallResult:
             result.finish_reason,
         )
     return result
+
+
+def _post_json(
+    url: str,
+    *,
+    headers: dict[str, str],
+    json: dict[str, Any],
+    timeout: int,
+) -> requests.Response:
+    """POST JSON, retrying once without environment proxies on proxy failure.
+
+    Some Windows desktop sessions inherit a broken HTTP(S)_PROXY setting from
+    other tools. The API endpoint is then reachable in a normal shell test but
+    Streamlit review/generation fails with ProxyError. Keep the first request
+    compatible with requests' normal behavior, then fall back to a direct
+    session only for proxy failures.
+    """
+
+    try:
+        return requests.post(url, headers=headers, json=json, timeout=timeout)
+    except requests.exceptions.ProxyError as exc:
+        session = requests.Session()
+        session.trust_env = False
+        try:
+            return session.post(url, headers=headers, json=json, timeout=timeout)
+        except requests.RequestException as direct_exc:
+            raise requests.RequestException(
+                f"代理连接失败，直连重试也失败：{direct_exc}"
+            ) from exc
 
 
 def parse_json_object(content: str) -> dict[str, Any]:

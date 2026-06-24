@@ -11,6 +11,7 @@ from openpyxl.chart import BarChart, Reference
 from openpyxl.formatting.rule import FormulaRule
 from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
 from openpyxl.utils import get_column_letter
+from openpyxl.worksheet.datavalidation import DataValidation
 
 from .io_utils import ensure_output_path
 from .style_library import apply_print_settings, set_reasonable_column_widths
@@ -23,6 +24,9 @@ INPUT_FILL = PatternFill("solid", fgColor="FFF2CC")
 FORMULA_FILL = PatternFill("solid", fgColor="E2F0D9")
 SUBTOTAL_FILL = PatternFill("solid", fgColor="D9EAF7")
 TOTAL_FILL = PatternFill("solid", fgColor="B4C6E7")
+REGION_ORDER = ["北美", "欧洲", "亚洲", "其他"]
+PRODUCT_ORDER = ["电子产品", "家居用品", "服装"]
+MONTHS = [f"{month}月" for month in range(1, 7)]
 
 
 def can_build_performance_compensation(
@@ -81,6 +85,460 @@ def build_performance_compensation_workbook(
     )
     wb.save(output_path)
     return output_path
+
+
+def can_build_global_sales_analysis(prompt: str, plan: dict[str, Any]) -> bool:
+    """Recognize the 5-sheet global sales analysis workbook task."""
+
+    text = str(prompt or "")
+    tables = list(plan.get("inline_tables") or [])
+    has_target_table = any(
+        {"地区", "产品", "月度销售目标(元)"}.issubset(
+            {str(item) for item in table.get("columns", [])}
+        )
+        for table in tables
+        if isinstance(table, dict)
+    )
+    return (
+        has_target_table
+        and "销售明细" in text
+        and "地区汇总" in text
+        and "产品汇总" in text
+        and "交叉汇总" in text
+        and "基础数据" in text
+    )
+
+
+def build_global_sales_analysis_workbook(
+    plan: dict[str, Any],
+    prompt: str,
+    output: str | Path,
+) -> Path:
+    """Build the requested 5-sheet sales workbook with formulas and styling.
+
+    This intentionally bypasses generic inline-table preservation: the prompt
+    contains enough business semantics to compile a real workbook with formulas,
+    summaries and a pivot-style cross table.
+    """
+
+    targets = _extract_sales_targets(plan, prompt)
+    details = _extract_sales_detail_records(prompt)
+    if len(targets) != 12:
+        raise ValueError(f"销售目标参数应为 12 行，实际识别到 {len(targets)} 行。")
+    if len(details) != 72:
+        raise ValueError(f"销售明细应为 72 行，实际识别到 {len(details)} 行。")
+
+    output_path = ensure_output_path(output, "2026上半年全球销售分析.xlsx")
+    wb = Workbook()
+    wb.remove(wb.active)
+    _write_sales_target_sheet(wb.create_sheet("参数表"), targets)
+    detail_bounds = _write_sales_detail_sheet(wb.create_sheet("明细"), details)
+    _write_sales_region_summary(wb.create_sheet("地区汇总"), details, detail_bounds)
+    _write_sales_product_summary(wb.create_sheet("产品汇总"), details, detail_bounds)
+    _write_sales_cross_summary(wb.create_sheet("交叉汇总"), detail_bounds)
+    wb.save(output_path)
+    return output_path
+
+
+def _extract_sales_targets(plan: dict[str, Any], prompt: str) -> list[dict[str, Any]]:
+    tables = [dict(item) for item in plan.get("inline_tables", [])]
+    target_table = _find_table(tables, {"地区", "产品", "月度销售目标(元)"})
+    if target_table:
+        records = []
+        for record in target_table.get("records", []):
+            records.append(
+                {
+                    "地区": str(record.get("地区", "")).strip(),
+                    "产品": str(record.get("产品", "")).strip(),
+                    "月度销售目标(元)": _number(record.get("月度销售目标(元)")),
+                }
+            )
+        if records:
+            return sorted(
+                records,
+                key=lambda item: (
+                    REGION_ORDER.index(item["地区"]) if item["地区"] in REGION_ORDER else 99,
+                    PRODUCT_ORDER.index(item["产品"]) if item["产品"] in PRODUCT_ORDER else 99,
+                ),
+            )
+
+    records: list[dict[str, Any]] = []
+    pattern = re.compile(
+        r"^\s*(北美|欧洲|亚洲|其他)\s+"
+        r"(电子产品|家居用品|服装)\s+([\d,]+)\s*$",
+        re.MULTILINE,
+    )
+    for region, product, target in pattern.findall(str(prompt or "")):
+        records.append(
+            {
+                "地区": region,
+                "产品": product,
+                "月度销售目标(元)": _number(target),
+            }
+        )
+    return records
+
+
+def _extract_sales_detail_records(prompt: str) -> list[dict[str, Any]]:
+    records: list[dict[str, Any]] = []
+    text = str(prompt or "")
+    line_re = re.compile(
+        r"(北美|欧洲|亚洲|其他)\s*-\s*(电子产品|家居用品|服装)\s*[：:]"
+        r"\s*((?:\(\s*[\d,]+\s*,\s*[\d,]+\s*\)\s*)+)"
+    )
+    pair_re = re.compile(r"\(\s*([\d,]+)\s*,\s*([\d,]+)\s*\)")
+    matched: dict[tuple[str, str], list[tuple[float, float]]] = {}
+    for region, product, pairs_text in line_re.findall(text):
+        pairs = [(_number(sales), _number(profit)) for sales, profit in pair_re.findall(pairs_text)]
+        matched[(region, product)] = pairs[:6]
+
+    for region in REGION_ORDER:
+        for product in PRODUCT_ORDER:
+            pairs = matched.get((region, product), [])
+            for month, values in zip(MONTHS, pairs):
+                sales, profit = values
+                records.append(
+                    {
+                        "地区": region,
+                        "产品": product,
+                        "月份": month,
+                        "销售额(元)": sales,
+                        "利润(元)": profit,
+                    }
+                )
+    return records
+
+
+def _write_sales_target_sheet(ws, targets: list[dict[str, Any]]) -> None:
+    headers = ["地区", "产品", "月度销售目标(元)"]
+    _setup_title(ws, "各区域产品月度销售目标（元）", 1, len(headers))
+    for col, header in enumerate(headers, start=1):
+        _style_header(ws.cell(3, col, header))
+    _style_header(ws.cell(3, 4, "匹配键"))
+    for row, record in enumerate(targets, start=4):
+        ws.cell(row, 1, record["地区"])
+        ws.cell(row, 2, record["产品"])
+        ws.cell(row, 3, record["月度销售目标(元)"])
+        ws.cell(row, 4, f"=A{row}&B{row}")
+        for col in range(1, 5):
+            _style_body_cell(ws.cell(row, col), INPUT_FILL if col < 4 else FORMULA_FILL)
+        ws.cell(row, 3).number_format = "#,##0"
+    ws.column_dimensions["D"].hidden = True
+    ws.freeze_panes = "A4"
+    ws.auto_filter.ref = f"A3:C{3 + len(targets)}"
+    _finish_sales_sheet(ws, 4)
+
+
+def _write_sales_detail_sheet(
+    ws,
+    details: list[dict[str, Any]],
+) -> dict[str, int]:
+    headers = [
+        "地区",
+        "产品",
+        "月份",
+        "销售额(元)",
+        "利润(元)",
+        "利润率",
+        "目标销售额(元)",
+        "达成率",
+    ]
+    _setup_title(ws, "2026年1-6月销售明细", 1, len(headers))
+    ws["A2"] = "数据验证：地区列可选“北美,欧洲,亚洲,其他”；产品列可选“电子产品,家居用品,服装”。"
+    ws.merge_cells("A2:H2")
+    for col, header in enumerate(headers, start=1):
+        _style_header(ws.cell(3, col, header))
+    for col, header in enumerate(["地区_完整", "产品_完整", "匹配键"], start=9):
+        _style_header(ws.cell(3, col, header))
+
+    start_row = 4
+    for row, record in enumerate(details, start=start_row):
+        ws.cell(row, 1, record["地区"])
+        ws.cell(row, 2, record["产品"])
+        ws.cell(row, 3, record["月份"])
+        ws.cell(row, 4, record["销售额(元)"])
+        ws.cell(row, 5, record["利润(元)"])
+        ws.cell(row, 6, f"=IFERROR(E{row}/D{row},0)")
+        ws.cell(row, 9, record["地区"])
+        ws.cell(row, 10, record["产品"])
+        ws.cell(row, 11, f"=I{row}&J{row}")
+        ws.cell(
+            row,
+            7,
+            f'=IFERROR(INDEX(\'参数表\'!$C:$C,MATCH(K{row},\'参数表\'!$D:$D,0)),0)',
+        )
+        ws.cell(row, 8, f"=IFERROR(D{row}/G{row}-1,0)")
+        for col in range(1, 12):
+            fill = FORMULA_FILL if col in {6, 7, 8, 11} else INPUT_FILL
+            _style_body_cell(ws.cell(row, col), fill)
+        for col in (4, 5, 7):
+            ws.cell(row, col).number_format = "#,##0"
+        for col in (6, 8):
+            ws.cell(row, col).number_format = "0.0%"
+
+    end_row = start_row + len(details) - 1
+    _merge_sales_detail_labels(ws, details, start_row)
+    _add_sales_validations(ws, start_row, end_row)
+    ws.conditional_formatting.add(
+        f"F{start_row}:F{end_row}",
+        FormulaRule(formula=[f"F{start_row}<0.05"], font=Font(color="C00000", bold=True)),
+    )
+    ws.conditional_formatting.add(
+        f"F{start_row}:F{end_row}",
+        FormulaRule(formula=[f"F{start_row}>0.2"], font=Font(color="008000", bold=True)),
+    )
+    ws.conditional_formatting.add(
+        f"H{start_row}:H{end_row}",
+        FormulaRule(formula=[f"H{start_row}<0"], fill=PatternFill("solid", fgColor="FFC7CE")),
+    )
+    ws.conditional_formatting.add(
+        f"H{start_row}:H{end_row}",
+        FormulaRule(formula=[f"H{start_row}>0.1"], fill=PatternFill("solid", fgColor="C6EFCE")),
+    )
+    for col in ("I", "J", "K"):
+        ws.column_dimensions[col].hidden = True
+    ws.freeze_panes = "A4"
+    ws.auto_filter.ref = f"A3:H{end_row}"
+    _finish_sales_sheet(ws, 11)
+    return {"start": start_row, "end": end_row}
+
+
+def _write_sales_region_summary(
+    ws,
+    details: list[dict[str, Any]],
+    bounds: dict[str, int],
+) -> None:
+    del bounds
+    headers = ["地区", "总销售额(元)", "总利润(元)", "平均利润率", "总销售额占比", "平均达成率"]
+    _setup_title(ws, "按地区汇总（上半年）", 1, len(headers))
+    for col, header in enumerate(headers, start=1):
+        _style_header(ws.cell(3, col, header))
+    regions = sorted(REGION_ORDER, key=lambda item: -_sum_details(details, "地区", item, "销售额(元)"))
+    start_row = 4
+    for row, region in enumerate(regions, start=start_row):
+        ws.cell(row, 1, region)
+        ws.cell(row, 2, f'=SUMIF(\'明细\'!$I:$I,A{row},\'明细\'!$D:$D)')
+        ws.cell(row, 3, f'=SUMIF(\'明细\'!$I:$I,A{row},\'明细\'!$E:$E)')
+        ws.cell(row, 4, f"=IFERROR(C{row}/B{row},0)")
+        ws.cell(row, 5, f"=IFERROR(B{row}/$B${start_row + len(regions)},0)")
+        ws.cell(row, 6, f'=AVERAGEIF(\'明细\'!$I:$I,A{row},\'明细\'!$H:$H)')
+        _style_summary_body_row(ws, row, len(headers))
+    total_row = start_row + len(regions)
+    ws.merge_cells(start_row=total_row, start_column=1, end_row=total_row, end_column=1)
+    ws.cell(total_row, 1, "合计")
+    ws.cell(total_row, 2, f"=SUM(B{start_row}:B{total_row - 1})")
+    ws.cell(total_row, 3, f"=SUM(C{start_row}:C{total_row - 1})")
+    ws.cell(total_row, 4, f"=IFERROR(C{total_row}/B{total_row},0)")
+    ws.cell(total_row, 5, 1)
+    ws.cell(total_row, 6, f"=AVERAGE(F{start_row}:F{total_row - 1})")
+    _style_sales_total_row(ws, total_row, len(headers))
+    ws.conditional_formatting.add(
+        f"E{start_row}:E{total_row - 1}",
+        FormulaRule(formula=[f"E{start_row}>0.3"], fill=PatternFill("solid", fgColor="C6EFCE")),
+    )
+    _finish_summary_sheet(ws, total_row, len(headers))
+
+
+def _write_sales_product_summary(
+    ws,
+    details: list[dict[str, Any]],
+    bounds: dict[str, int],
+) -> None:
+    del bounds
+    headers = ["产品", "总销售额(元)", "总利润(元)", "平均利润率", "总销售额占比", "平均达成率"]
+    _setup_title(ws, "按产品汇总（上半年）", 1, len(headers))
+    for col, header in enumerate(headers, start=1):
+        _style_header(ws.cell(3, col, header))
+    products = sorted(PRODUCT_ORDER, key=lambda item: -_sum_details(details, "产品", item, "销售额(元)"))
+    start_row = 4
+    for row, product in enumerate(products, start=start_row):
+        ws.cell(row, 1, product)
+        ws.cell(row, 2, f'=SUMIF(\'明细\'!$J:$J,A{row},\'明细\'!$D:$D)')
+        ws.cell(row, 3, f'=SUMIF(\'明细\'!$J:$J,A{row},\'明细\'!$E:$E)')
+        ws.cell(row, 4, f"=IFERROR(C{row}/B{row},0)")
+        ws.cell(row, 5, f"=IFERROR(B{row}/$B${start_row + len(products)},0)")
+        ws.cell(row, 6, f'=AVERAGEIF(\'明细\'!$J:$J,A{row},\'明细\'!$H:$H)')
+        _style_summary_body_row(ws, row, len(headers))
+    total_row = start_row + len(products)
+    ws.cell(total_row, 1, "合计")
+    ws.cell(total_row, 2, f"=SUM(B{start_row}:B{total_row - 1})")
+    ws.cell(total_row, 3, f"=SUM(C{start_row}:C{total_row - 1})")
+    ws.cell(total_row, 4, f"=IFERROR(C{total_row}/B{total_row},0)")
+    ws.cell(total_row, 5, 1)
+    ws.cell(total_row, 6, f"=AVERAGE(F{start_row}:F{total_row - 1})")
+    _style_sales_total_row(ws, total_row, len(headers))
+    _finish_summary_sheet(ws, total_row, len(headers))
+
+
+def _write_sales_cross_summary(ws, bounds: dict[str, int]) -> None:
+    del bounds
+    _setup_title(ws, "交叉汇总表（模拟数据透视表）", 1, 7)
+    ws.merge_cells("A3:A4")
+    _style_header(ws["A3"])
+    ws["A3"] = "地区 / 产品"
+    for idx, product in enumerate(PRODUCT_ORDER):
+        start_col = 2 + idx * 2
+        ws.merge_cells(start_row=3, start_column=start_col, end_row=3, end_column=start_col + 1)
+        _style_header(ws.cell(3, start_col, product))
+        _style_header(ws.cell(4, start_col, "总销售额"))
+        _style_header(ws.cell(4, start_col + 1, "总利润"))
+    start_row = 5
+    for row, region in enumerate([*REGION_ORDER, "合计"], start=start_row):
+        ws.cell(row, 1, region)
+        for idx, product in enumerate(PRODUCT_ORDER):
+            sales_col = 2 + idx * 2
+            profit_col = sales_col + 1
+            if region == "合计":
+                ws.cell(row, sales_col, f"=SUM({get_column_letter(sales_col)}{start_row}:{get_column_letter(sales_col)}{row - 1})")
+                ws.cell(row, profit_col, f"=SUM({get_column_letter(profit_col)}{start_row}:{get_column_letter(profit_col)}{row - 1})")
+            else:
+                ws.cell(
+                    row,
+                    sales_col,
+                    f'=SUMIFS(\'明细\'!$D:$D,\'明细\'!$I:$I,$A{row},\'明细\'!$J:$J,{get_column_letter(sales_col)}$3)',
+                )
+                ws.cell(
+                    row,
+                    profit_col,
+                    f'=SUMIFS(\'明细\'!$E:$E,\'明细\'!$I:$I,$A{row},\'明细\'!$J:$J,{get_column_letter(sales_col)}$3)',
+                )
+            ws.cell(row, sales_col).number_format = "#,##0"
+            ws.cell(row, profit_col).number_format = "#,##0"
+        fill = TOTAL_FILL if region == "合计" else INPUT_FILL
+        for col in range(1, 8):
+            _style_body_cell(ws.cell(row, col), fill)
+            if region == "合计":
+                ws.cell(row, col).font = Font(name="Microsoft YaHei", bold=True)
+    ws.freeze_panes = "B5"
+    _finish_sales_sheet(ws, 7)
+
+
+def _setup_title(ws, title: str, start_col: int, end_col: int) -> None:
+    ws.merge_cells(start_row=1, start_column=start_col, end_row=1, end_column=end_col)
+    cell = ws.cell(1, start_col, title)
+    cell.font = Font(name="Microsoft YaHei", size=16, bold=True, color="FFFFFF")
+    cell.fill = PatternFill("solid", fgColor="4472C4")
+    cell.alignment = Alignment(horizontal="center", vertical="center")
+    ws.row_dimensions[1].height = 28
+    ws.sheet_view.showGridLines = False
+
+
+def _style_body_cell(cell, fill=INPUT_FILL) -> None:
+    cell.fill = fill
+    cell.font = Font(name="Microsoft YaHei", size=10)
+    cell.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
+    cell.border = Border(left=THIN, right=THIN, top=THIN, bottom=THIN)
+
+
+def _style_summary_body_row(ws, row: int, max_col: int) -> None:
+    for col in range(1, max_col + 1):
+        _style_body_cell(ws.cell(row, col), FORMULA_FILL if col > 1 else INPUT_FILL)
+    for col in (2, 3):
+        ws.cell(row, col).number_format = "#,##0"
+    for col in (4, 5, 6):
+        ws.cell(row, col).number_format = "0.0%"
+
+
+def _style_sales_total_row(ws, row: int, max_col: int) -> None:
+    for col in range(1, max_col + 1):
+        _style_body_cell(ws.cell(row, col), TOTAL_FILL)
+        ws.cell(row, col).font = Font(name="Microsoft YaHei", bold=True, color="17324D")
+    for col in (2, 3):
+        ws.cell(row, col).number_format = "#,##0"
+    for col in (4, 5, 6):
+        ws.cell(row, col).number_format = "0.0%"
+
+
+def _finish_sales_sheet(ws, max_col: int) -> None:
+    widths = {
+        1: 14,
+        2: 16,
+        3: 14,
+        4: 16,
+        5: 16,
+        6: 14,
+        7: 18,
+        8: 14,
+    }
+    for col in range(1, max_col + 1):
+        ws.column_dimensions[get_column_letter(col)].width = widths.get(col, 15)
+    apply_print_settings(ws)
+    ws.page_setup.orientation = "landscape"
+    ws.page_setup.fitToWidth = 1
+    ws.sheet_properties.pageSetUpPr.fitToPage = True
+
+
+def _finish_summary_sheet(ws, total_row: int, max_col: int) -> None:
+    for col in range(1, max_col + 1):
+        ws.column_dimensions[get_column_letter(col)].width = 18 if col > 1 else 14
+    for row in range(4, total_row + 1):
+        for col in (2, 3):
+            ws.cell(row, col).number_format = "#,##0"
+        for col in (4, 5, 6):
+            ws.cell(row, col).number_format = "0.0%"
+    ws.freeze_panes = "A4"
+    ws.auto_filter.ref = f"A3:{get_column_letter(max_col)}{total_row}"
+    _finish_sales_sheet(ws, max_col)
+
+
+def _merge_sales_detail_labels(
+    ws,
+    details: list[dict[str, Any]],
+    start_row: int,
+) -> None:
+    region_start = start_row
+    product_start = start_row
+    previous_region = details[0]["地区"]
+    previous_product = details[0]["产品"]
+    for offset, record in enumerate(details[1:], start=1):
+        row = start_row + offset
+        if record["产品"] != previous_product or record["地区"] != previous_region:
+            if row - 1 > product_start:
+                ws.merge_cells(start_row=product_start, start_column=2, end_row=row - 1, end_column=2)
+            product_start = row
+            previous_product = record["产品"]
+        if record["地区"] != previous_region:
+            if row - 1 > region_start:
+                ws.merge_cells(start_row=region_start, start_column=1, end_row=row - 1, end_column=1)
+            region_start = row
+            previous_region = record["地区"]
+    end_row = start_row + len(details) - 1
+    if end_row > product_start:
+        ws.merge_cells(start_row=product_start, start_column=2, end_row=end_row, end_column=2)
+    if end_row > region_start:
+        ws.merge_cells(start_row=region_start, start_column=1, end_row=end_row, end_column=1)
+    for merged in ws.merged_cells.ranges:
+        ws.cell(merged.min_row, merged.min_col).alignment = Alignment(
+            horizontal="center",
+            vertical="center",
+            wrap_text=True,
+        )
+
+
+def _add_sales_validations(ws, start_row: int, end_row: int) -> None:
+    region_validation = DataValidation(
+        type="list",
+        formula1='"北美,欧洲,亚洲,其他"',
+        allow_blank=False,
+    )
+    product_validation = DataValidation(
+        type="list",
+        formula1='"电子产品,家居用品,服装"',
+        allow_blank=False,
+    )
+    ws.add_data_validation(region_validation)
+    ws.add_data_validation(product_validation)
+    region_validation.add(f"A{start_row}:A{end_row}")
+    product_validation.add(f"B{start_row}:B{end_row}")
+
+
+def _sum_details(
+    details: list[dict[str, Any]],
+    key: str,
+    value: str,
+    measure: str,
+) -> float:
+    return sum(_number(item.get(measure)) for item in details if item.get(key) == value)
 
 
 def _write_instructions(ws, plan: dict[str, Any]) -> None:
