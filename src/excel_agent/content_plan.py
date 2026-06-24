@@ -119,12 +119,13 @@ def build_local_content_plan(
     """Build a conservative plan from explicit structure and inline records."""
 
     text = str(prompt or "").strip()
-    columns = extract_requested_columns(text)
-    inline_tables = extract_inline_tables(text)
+    data_text = _strip_revision_sections(text)
+    columns = extract_requested_columns(data_text)
+    inline_tables = extract_inline_tables(data_text)
     primary_table = primary_inline_table(inline_tables)
     if primary_table and not columns:
         columns = list(primary_table.get("columns") or [])
-    weather_records = extract_weather_records(text)
+    weather_records = extract_weather_records(data_text)
     if weather_records and not columns:
         columns = [
             "日期",
@@ -143,7 +144,7 @@ def build_local_content_plan(
     elif primary_table:
         records = [dict(item) for item in primary_table.get("records", [])]
     elif columns:
-        records = extract_delimited_records(text, columns)
+        records = extract_delimited_records(data_text, columns)
 
     explicit_title_match = TITLE_RE.search(text)
     explicit_title_match = explicit_title_match or TITLE_ACTION_RE.search(text)
@@ -194,6 +195,25 @@ def build_local_content_plan(
         "source": "local_rules",
         "input_file_names": [Path(item).name for item in (input_files or [])],
     }
+
+
+def _strip_revision_sections(text: str) -> str:
+    """Keep revision/review prose from being parsed as user data tables."""
+
+    markers = (
+        "\n本次修改要求：",
+        "\n本次修改要求:",
+        "\n修正问题：",
+        "\n修正问题:",
+        "\n采用建议：",
+        "\n采用建议:",
+    )
+    end = len(text)
+    for marker in markers:
+        index = text.find(marker)
+        if index != -1:
+            end = min(end, index)
+    return text[:end].strip()
 
 
 def merge_model_content_plan(

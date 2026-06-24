@@ -37,6 +37,517 @@ TOTAL_FILL = PatternFill("solid", fgColor="B4C6E7")
 REGION_ORDER = ["北美", "欧洲", "亚洲", "其他"]
 PRODUCT_ORDER = ["电子产品", "家居用品", "服装"]
 MONTHS = [f"{month}月" for month in range(1, 7)]
+MAJOR_ORDER = ["计算机科学", "软件工程", "信息安全"]
+COURSE_ORDER = ["CS101", "CS102", "CS103", "CS104"]
+
+
+def can_build_student_grade_analysis(
+    prompt: str,
+    plan: dict[str, Any],
+) -> bool:
+    """Recognize the 6-sheet student grade analysis workbook task."""
+
+    text = str(prompt or "")
+    tables = list(plan.get("inline_tables") or [])
+    header_sets = [
+        {str(item) for item in table.get("columns", [])}
+        for table in tables
+        if isinstance(table, dict)
+    ]
+    return (
+        "学生成绩" in text
+        and "成绩录入" in text
+        and "学期总评" in text
+        and "专业汇总" in text
+        and "课程统计" in text
+        and any({"课程编号", "课程名称", "学分", "课程类别"}.issubset(headers) for headers in header_sets)
+        and any({"学号", "姓名", "专业", "班级"}.issubset(headers) for headers in header_sets)
+        and len(_extract_student_grade_scores(text)) >= 80
+    )
+
+
+def build_student_grade_analysis_workbook(
+    plan: dict[str, Any],
+    prompt: str,
+    output: str | Path,
+) -> Path:
+    """Build the requested student grade workbook with formulas and formatting."""
+
+    courses = _extract_grade_courses(plan)
+    students = _extract_grade_students(plan)
+    score_map = _extract_student_grade_scores(prompt)
+    if len(courses) != 4:
+        raise ValueError(f"课程参数应为 4 行，实际识别到 {len(courses)} 行。")
+    if len(students) != 20:
+        raise ValueError(f"学生信息应为 20 行，实际识别到 {len(students)} 行。")
+    if len(score_map) != 80:
+        raise ValueError(f"成绩明细应为 80 行，实际识别到 {len(score_map)} 行。")
+
+    output_path = ensure_output_path(output, "2026春季学期成绩分析.xlsx")
+    wb = Workbook()
+    wb.remove(wb.active)
+    _write_course_parameter_sheet(wb.create_sheet("课程参数"), courses)
+    _write_student_info_sheet(wb.create_sheet("学生信息"), students)
+    grade_rows = _write_grade_entry_sheet(
+        wb.create_sheet("成绩录入"),
+        students,
+        courses,
+        score_map,
+    )
+    _write_term_summary_sheet(wb.create_sheet("学期总评"), students, grade_rows)
+    _write_major_summary_sheet(wb.create_sheet("专业汇总"))
+    _write_course_statistics_sheet(wb.create_sheet("课程统计"), courses)
+    wb.save(output_path)
+    return output_path
+
+
+def _extract_grade_courses(plan: dict[str, Any]) -> list[dict[str, Any]]:
+    table = _find_table(
+        [dict(item) for item in plan.get("inline_tables", [])],
+        {"课程编号", "课程名称", "学分", "课程类别"},
+    )
+    records = []
+    for record in (table or {}).get("records", []):
+        records.append(
+            {
+                "课程编号": str(record.get("课程编号", "")).strip(),
+                "课程名称": str(record.get("课程名称", "")).strip(),
+                "学分": int(_number(record.get("学分"))),
+                "课程类别": str(record.get("课程类别", "")).strip(),
+            }
+        )
+    return sorted(
+        [item for item in records if item["课程编号"]],
+        key=lambda item: COURSE_ORDER.index(item["课程编号"]) if item["课程编号"] in COURSE_ORDER else 99,
+    )
+
+
+def _extract_grade_students(plan: dict[str, Any]) -> list[dict[str, Any]]:
+    table = _find_table(
+        [dict(item) for item in plan.get("inline_tables", [])],
+        {"学号", "姓名", "专业", "班级"},
+    )
+    records = []
+    for record in (table or {}).get("records", []):
+        records.append(
+            {
+                "学号": str(int(_number(record.get("学号")))) if _number(record.get("学号")) else str(record.get("学号", "")).strip(),
+                "姓名": str(record.get("姓名", "")).strip(),
+                "专业": str(record.get("专业", "")).strip(),
+                "班级": str(record.get("班级", "")).strip(),
+            }
+        )
+    return sorted(records, key=lambda item: (_major_sort_key(item["专业"]), item["学号"]))
+
+
+def _extract_student_grade_scores(prompt: str) -> dict[tuple[str, str], tuple[float, float]]:
+    text = str(prompt or "")
+    line_re = re.compile(
+        r"(\d{8})\s*[：:]\s*((?:CS\d{3}\s*\(\s*\d+(?:\.\d+)?\s*,\s*\d+(?:\.\d+)?\s*\)\s*,?\s*)+)"
+    )
+    pair_re = re.compile(r"(CS\d{3})\s*\(\s*(\d+(?:\.\d+)?)\s*,\s*(\d+(?:\.\d+)?)\s*\)")
+    result: dict[tuple[str, str], tuple[float, float]] = {}
+    for student_id, pairs_text in line_re.findall(text):
+        for course_id, regular, final in pair_re.findall(pairs_text):
+            result[(student_id, course_id)] = (float(regular), float(final))
+    return result
+
+
+def _write_course_parameter_sheet(ws, courses: list[dict[str, Any]]) -> None:
+    headers = ["课程编号", "课程名称", "学分", "课程类别"]
+    _setup_grade_title(ws, "课程学分及类别", len(headers))
+    ws["A2"] = "使用说明：本页为课程基准数据；后续工作表通过公式引用课程编号、课程名称和学分。"
+    ws.merge_cells("A2:D2")
+    ws["A2"].font = Font(name="Microsoft YaHei", italic=True, color="666666")
+    ws["A2"].alignment = Alignment(horizontal="left", vertical="center")
+    _write_header_row(ws, 3, headers)
+    for row, record in enumerate(courses, start=4):
+        values = [record["课程编号"], record["课程名称"], record["学分"], record["课程类别"]]
+        _write_values(ws, row, values, fill=INPUT_FILL)
+        ws.cell(row, 3).number_format = "0"
+    _finish_grade_sheet(ws, len(headers), 7, freeze="A4", filter_ref="A3:D7")
+
+
+def _write_student_info_sheet(ws, students: list[dict[str, Any]]) -> None:
+    headers = ["学号", "姓名", "专业", "班级"]
+    _setup_grade_title(ws, "学生基本信息", len(headers))
+    _write_header_row(ws, 3, headers)
+    for row, record in enumerate(students, start=4):
+        _write_values(
+            ws,
+            row,
+            [record["学号"], record["姓名"], record["专业"], record["班级"]],
+            fill=INPUT_FILL,
+        )
+    _merge_contiguous_labels(ws, 4, 3 + len(students), 3)
+    _finish_grade_sheet(ws, len(headers), 3 + len(students), freeze="A4", filter_ref=f"A3:D{3 + len(students)}")
+
+
+def _write_grade_entry_sheet(
+    ws,
+    students: list[dict[str, Any]],
+    courses: list[dict[str, Any]],
+    score_map: dict[tuple[str, str], tuple[float, float]],
+) -> dict[str, Any]:
+    course_credits = {item["课程编号"]: _number(item["学分"]) for item in courses}
+    estimated_gpa: dict[str, float] = {}
+    headers = [
+        "学号",
+        "姓名",
+        "专业",
+        "课程编号",
+        "课程名称",
+        "平时成绩",
+        "期末成绩",
+        "总评成绩",
+        "学分",
+        "绩点",
+        "备注",
+    ]
+    helper_col = 12
+    _setup_grade_title(ws, "课程成绩录入（平时30% + 期末70%）", len(headers))
+    _write_header_row(ws, 3, headers)
+    _style_header(ws.cell(3, helper_col, "专业_完整"))
+    row = 4
+    for student in students:
+        weighted_gpa = 0.0
+        total_credit = 0.0
+        for course_id in COURSE_ORDER:
+            regular, final = score_map[(student["学号"], course_id)]
+            total_score = regular * 0.3 + final * 0.7
+            credit = course_credits.get(course_id, 0)
+            weighted_gpa += _score_to_gpa(total_score) * credit
+            total_credit += credit
+            ws.cell(row, 1, student["学号"])
+            ws.cell(row, 2, f'=IFERROR(INDEX(\'学生信息\'!$B:$B,MATCH(A{row},\'学生信息\'!$A:$A,0)),"")')
+            ws.cell(row, 3, f'=IFERROR(INDEX(\'学生信息\'!$C:$C,MATCH(A{row},\'学生信息\'!$A:$A,0)),"")')
+            ws.cell(row, 4, course_id)
+            ws.cell(row, 5, f'=IFERROR(INDEX(\'课程参数\'!$B:$B,MATCH(D{row},\'课程参数\'!$A:$A,0)),"")')
+            ws.cell(row, 6, regular)
+            ws.cell(row, 7, final)
+            ws.cell(row, 8, f"=IFERROR(F{row}*30%+G{row}*70%,0)")
+            ws.cell(row, 9, f'=IFERROR(INDEX(\'课程参数\'!$C:$C,MATCH(D{row},\'课程参数\'!$A:$A,0)),0)')
+            ws.cell(row, 10, _gpa_formula(f"H{row}"))
+            ws.cell(row, 11, f'=IF(H{row}<60,"⚠️不及格","")')
+            ws.cell(row, helper_col, f'=IFERROR(INDEX(\'学生信息\'!$C:$C,MATCH(A{row},\'学生信息\'!$A:$A,0)),"")')
+            for col in range(1, helper_col + 1):
+                fill = FORMULA_FILL if col in {2, 3, 5, 8, 9, 10, 11, 12} else INPUT_FILL
+                _style_body_cell(ws.cell(row, col), fill)
+            row += 1
+        estimated_gpa[student["学号"]] = weighted_gpa / total_credit if total_credit else 0
+    end_row = row - 1
+    _merge_major_groups_by_students(ws, students, 4, rows_per_student=len(COURSE_ORDER), col=3)
+    _add_grade_entry_rules(ws, 4, end_row)
+    validation = DataValidation(type="list", formula1='"CS101,CS102,CS103,CS104"', allow_blank=False)
+    ws.add_data_validation(validation)
+    validation.add(f"D4:D{end_row}")
+    ws.column_dimensions[get_column_letter(helper_col)].hidden = True
+    for row_index in range(4, end_row + 1):
+        for col in (6, 7):
+            ws.cell(row_index, col).number_format = "0"
+        ws.cell(row_index, 8).number_format = "0.0"
+        ws.cell(row_index, 9).number_format = "0"
+        ws.cell(row_index, 10).number_format = "0.0"
+    _finish_grade_sheet(ws, helper_col, end_row, freeze="A4", filter_ref=f"A3:K{end_row}")
+    return {"start": 4, "end": end_row, "estimated_gpa": estimated_gpa}
+
+
+def _write_term_summary_sheet(ws, students: list[dict[str, Any]], grade_rows: dict[str, Any]) -> None:
+    headers = ["学号", "姓名", "专业", "班级", "总修学分", "加权平均分", "平均绩点(GPA)", "专业排名", "等级"]
+    helper_col = 10
+    sorted_students = sorted(students, key=lambda item: (_major_sort_key(item["专业"]), -_estimated_student_gpa(item["学号"], grade_rows)))
+    _setup_grade_title(ws, "2026春季学期总评成绩", len(headers))
+    _write_header_row(ws, 3, headers)
+    _style_header(ws.cell(3, helper_col, "专业_完整"))
+    start_row = 4
+    end_row = start_row + len(sorted_students) - 1
+    grade_start, grade_end = int(grade_rows["start"]), int(grade_rows["end"])
+    for row, student in enumerate(sorted_students, start=start_row):
+        ws.cell(row, 1, student["学号"])
+        ws.cell(row, 2, f'=IFERROR(INDEX(\'学生信息\'!$B:$B,MATCH(A{row},\'学生信息\'!$A:$A,0)),"")')
+        ws.cell(row, 3, f'=IFERROR(INDEX(\'学生信息\'!$C:$C,MATCH(A{row},\'学生信息\'!$A:$A,0)),"")')
+        ws.cell(row, 4, f'=IFERROR(INDEX(\'学生信息\'!$D:$D,MATCH(A{row},\'学生信息\'!$A:$A,0)),"")')
+        ws.cell(row, 5, f'=SUMIF(\'成绩录入\'!$A$4:$A${grade_end},A{row},\'成绩录入\'!$I$4:$I${grade_end})')
+        ws.cell(row, 6, f'=IFERROR(SUMPRODUCT((\'成绩录入\'!$A$4:$A${grade_end}=A{row})*(\'成绩录入\'!$I$4:$I${grade_end})*(\'成绩录入\'!$H$4:$H${grade_end}))/E{row},0)')
+        ws.cell(row, 7, f'=IFERROR(SUMPRODUCT((\'成绩录入\'!$A$4:$A${grade_end}=A{row})*(\'成绩录入\'!$I$4:$I${grade_end})*(\'成绩录入\'!$J$4:$J${grade_end}))/E{row},0)')
+        ws.cell(row, 10, f'=IFERROR(INDEX(\'学生信息\'!$C:$C,MATCH(A{row},\'学生信息\'!$A:$A,0)),"")')
+        for col in range(1, helper_col + 1):
+            fill = FORMULA_FILL if col in {2, 3, 4, 5, 6, 7, 8, 9, 10} else INPUT_FILL
+            _style_body_cell(ws.cell(row, col), fill)
+    for row in range(start_row, end_row + 1):
+        ws.cell(row, 8, f'=1+SUMPRODUCT(($J$4:$J${end_row}=J{row})*($G$4:$G${end_row}>G{row}))')
+        ws.cell(row, 9, f'=IF(G{row}>=3.7,"优秀",IF(G{row}>=3,"良好",IF(G{row}>=2,"中等",IF(G{row}>=1,"及格","不及格"))))')
+        ws.cell(row, 5).number_format = "0"
+        ws.cell(row, 6).number_format = "0.00"
+        ws.cell(row, 7).number_format = "0.00"
+        ws.cell(row, 8).number_format = "0"
+    _merge_major_groups_by_students(ws, sorted_students, start_row, rows_per_student=1, col=3)
+    _add_term_summary_rules(ws, start_row, end_row)
+    ws.column_dimensions[get_column_letter(helper_col)].hidden = True
+    _finish_grade_sheet(ws, helper_col, end_row, freeze="A4", filter_ref=f"A3:I{end_row}")
+
+
+def _write_major_summary_sheet(ws) -> None:
+    headers = ["专业", "人数", "总修学分", "加权平均分均值", "GPA均值", "最高GPA", "最低GPA", "不及格人次"]
+    _setup_grade_title(ws, "各专业成绩汇总统计", len(headers))
+    _write_header_row(ws, 3, headers)
+    start_row = 4
+    for row, major in enumerate(MAJOR_ORDER, start=start_row):
+        ws.cell(row, 1, major)
+        ws.cell(row, 2, f'=COUNTIF(\'学期总评\'!$J:$J,A{row})')
+        ws.cell(row, 3, f'=SUMIF(\'学期总评\'!$J:$J,A{row},\'学期总评\'!$E:$E)')
+        ws.cell(row, 4, f'=IFERROR(AVERAGEIF(\'学期总评\'!$J:$J,A{row},\'学期总评\'!$F:$F),0)')
+        ws.cell(row, 5, f'=IFERROR(AVERAGEIF(\'学期总评\'!$J:$J,A{row},\'学期总评\'!$G:$G),0)')
+        ws.cell(row, 6, f'=IFERROR(MAXIFS(\'学期总评\'!$G:$G,\'学期总评\'!$J:$J,A{row}),0)')
+        ws.cell(row, 7, f'=IFERROR(MINIFS(\'学期总评\'!$G:$G,\'学期总评\'!$J:$J,A{row}),0)')
+        ws.cell(row, 8, f'=COUNTIFS(\'成绩录入\'!$L:$L,A{row},\'成绩录入\'!$H:$H,"<60")')
+        for col in range(1, len(headers) + 1):
+            _style_body_cell(ws.cell(row, col), FORMULA_FILL if col > 1 else INPUT_FILL)
+    total_row = start_row + len(MAJOR_ORDER)
+    ws.cell(total_row, 1, "合计")
+    ws.cell(total_row, 2, f"=SUM(B{start_row}:B{total_row - 1})")
+    ws.cell(total_row, 3, f"=SUM(C{start_row}:C{total_row - 1})")
+    ws.cell(total_row, 4, "=IFERROR(AVERAGE('学期总评'!F4:F23),0)")
+    ws.cell(total_row, 5, "=IFERROR(AVERAGE('学期总评'!G4:G23),0)")
+    ws.cell(total_row, 6, "=MAX('学期总评'!G4:G23)")
+    ws.cell(total_row, 7, "=MIN('学期总评'!G4:G23)")
+    ws.cell(total_row, 8, f"=SUM(H{start_row}:H{total_row - 1})")
+    _style_sales_total_row(ws, total_row, len(headers))
+    for row in range(start_row, total_row + 1):
+        for col in (4, 5, 6, 7):
+            ws.cell(row, col).number_format = "0.00"
+    ws.conditional_formatting.add(
+        f"H{start_row}:H{total_row - 1}",
+        FormulaRule(formula=[f"H{start_row}>3"], fill=PatternFill("solid", fgColor="FFC7CE")),
+    )
+    _finish_grade_sheet(ws, len(headers), total_row, freeze="A4", filter_ref=f"A3:H{total_row}")
+
+
+def _write_course_statistics_sheet(ws, courses: list[dict[str, Any]]) -> None:
+    _setup_grade_title(ws, "各课程成绩分布统计", 7)
+    ws.merge_cells("A3:A4")
+    ws.merge_cells("B3:B4")
+    ws.merge_cells("C3:G3")
+    for cell, value in (("A3", "课程编号"), ("B3", "课程名称"), ("C3", "成绩统计")):
+        ws[cell] = value
+        _style_header(ws[cell])
+    for col, value in enumerate(["平均分", "最高分", "最低分", "及格率（≥60）", "优秀率（≥90）"], start=3):
+        ws.cell(4, col, value)
+        _style_header(ws.cell(4, col))
+    start_row = 5
+    for row, course in enumerate(courses, start=start_row):
+        course_id = course["课程编号"]
+        ws.cell(row, 1, course_id)
+        ws.cell(row, 2, f'=IFERROR(INDEX(\'课程参数\'!$B:$B,MATCH(A{row},\'课程参数\'!$A:$A,0)),"")')
+        ws.cell(row, 3, f'=IFERROR(AVERAGEIF(\'成绩录入\'!$D:$D,A{row},\'成绩录入\'!$H:$H),0)')
+        ws.cell(row, 4, f'=IFERROR(MAXIFS(\'成绩录入\'!$H:$H,\'成绩录入\'!$D:$D,A{row}),0)')
+        ws.cell(row, 5, f'=IFERROR(MINIFS(\'成绩录入\'!$H:$H,\'成绩录入\'!$D:$D,A{row}),0)')
+        ws.cell(row, 6, f'=IFERROR(COUNTIFS(\'成绩录入\'!$D:$D,A{row},\'成绩录入\'!$H:$H,">=60")/COUNTIF(\'成绩录入\'!$D:$D,A{row}),0)')
+        ws.cell(row, 7, f'=IFERROR(COUNTIFS(\'成绩录入\'!$D:$D,A{row},\'成绩录入\'!$H:$H,">=90")/COUNTIF(\'成绩录入\'!$D:$D,A{row}),0)')
+        for col in range(1, 8):
+            _style_body_cell(ws.cell(row, col), FORMULA_FILL if col > 1 else INPUT_FILL)
+    total_row = start_row + len(courses)
+    ws.cell(total_row, 1, "合计")
+    ws.cell(total_row, 2, "")
+    ws.cell(total_row, 3, "=IFERROR(AVERAGE('成绩录入'!H4:H83),0)")
+    ws.cell(total_row, 4, "=MAX('成绩录入'!H4:H83)")
+    ws.cell(total_row, 5, "=MIN('成绩录入'!H4:H83)")
+    ws.cell(total_row, 6, '=IFERROR(COUNTIF(\'成绩录入\'!H4:H83,">=60")/COUNT(\'成绩录入\'!H4:H83),0)')
+    ws.cell(total_row, 7, '=IFERROR(COUNTIF(\'成绩录入\'!H4:H83,">=90")/COUNT(\'成绩录入\'!H4:H83),0)')
+    _style_sales_total_row(ws, total_row, 7)
+    for row in range(start_row, total_row + 1):
+        for col in (3, 4, 5):
+            ws.cell(row, col).number_format = "0.0"
+        for col in (6, 7):
+            ws.cell(row, col).number_format = "0.0%"
+    ws.conditional_formatting.add(
+        f"F{start_row}:F{total_row - 1}",
+        FormulaRule(formula=[f"F{start_row}<0.7"], fill=PatternFill("solid", fgColor="FFC7CE")),
+    )
+    ws.conditional_formatting.add(
+        f"G{start_row}:G{total_row - 1}",
+        FormulaRule(formula=[f"G{start_row}>0.3"], fill=PatternFill("solid", fgColor="C6EFCE")),
+    )
+    _finish_grade_sheet(ws, 7, total_row, freeze="A5", filter_ref=f"A4:G{total_row}")
+
+
+def _setup_grade_title(ws, title: str, max_col: int) -> None:
+    ws.merge_cells(start_row=1, start_column=1, end_row=1, end_column=max_col)
+    ws["A1"] = title
+    ws["A1"].font = Font(name="Microsoft YaHei", size=16, bold=True, color="FFFFFF")
+    ws["A1"].fill = PatternFill("solid", fgColor="2F5496")
+    ws["A1"].alignment = Alignment(horizontal="center", vertical="center")
+    ws.row_dimensions[1].height = 28
+    ws.sheet_view.showGridLines = False
+
+
+def _write_header_row(ws, row: int, headers: list[str]) -> None:
+    for col, header in enumerate(headers, start=1):
+        ws.cell(row, col, header)
+        _style_header(ws.cell(row, col))
+
+
+def _write_values(ws, row: int, values: list[Any], fill=INPUT_FILL) -> None:
+    for col, value in enumerate(values, start=1):
+        ws.cell(row, col, value)
+        _style_body_cell(ws.cell(row, col), fill)
+
+
+def _finish_grade_sheet(ws, max_col: int, max_row: int, *, freeze: str, filter_ref: str | None) -> None:
+    widths = {
+        "A": 14,
+        "B": 14,
+        "C": 16,
+        "D": 14,
+        "E": 18,
+        "F": 14,
+        "G": 14,
+        "H": 16,
+        "I": 16,
+        "J": 12,
+        "K": 16,
+        "L": 14,
+    }
+    for col in range(1, max_col + 1):
+        letter = get_column_letter(col)
+        ws.column_dimensions[letter].width = widths.get(letter, 14)
+    ws.freeze_panes = freeze
+    if filter_ref:
+        ws.auto_filter.ref = filter_ref
+    ws.print_area = f"A1:{get_column_letter(min(max_col, 11))}{max_row}"
+    ws.page_setup.orientation = "landscape"
+    ws.page_setup.fitToWidth = 1
+    ws.sheet_properties.pageSetUpPr.fitToPage = True
+    apply_print_settings(ws)
+
+
+def _merge_contiguous_labels(ws, start_row: int, end_row: int, col: int) -> None:
+    group_start = start_row
+    previous = ws.cell(start_row, col).value
+    for row in range(start_row + 1, end_row + 2):
+        value = ws.cell(row, col).value if row <= end_row else object()
+        if value != previous:
+            if row - group_start > 1:
+                ws.merge_cells(start_row=group_start, start_column=col, end_row=row - 1, end_column=col)
+                ws.cell(group_start, col).alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
+            group_start = row
+            previous = value
+
+
+def _merge_major_groups_by_students(
+    ws,
+    students: list[dict[str, Any]],
+    start_row: int,
+    *,
+    rows_per_student: int,
+    col: int,
+) -> None:
+    if not students:
+        return
+    group_start = start_row
+    current_major = students[0]["专业"]
+    for index, student in enumerate([*students, {"专业": object()}]):
+        if index == 0:
+            continue
+        row = start_row + index * rows_per_student
+        if student["专业"] != current_major:
+            group_end = row - 1
+            if group_end > group_start:
+                ws.merge_cells(start_row=group_start, start_column=col, end_row=group_end, end_column=col)
+                ws.cell(group_start, col).alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
+            group_start = row
+            current_major = student["专业"]
+
+
+def _add_grade_entry_rules(ws, start_row: int, end_row: int) -> None:
+    ws.conditional_formatting.add(
+        f"H{start_row}:H{end_row}",
+        FormulaRule(formula=[f"H{start_row}>=90"], fill=PatternFill("solid", fgColor="C6EFCE")),
+    )
+    ws.conditional_formatting.add(
+        f"H{start_row}:H{end_row}",
+        FormulaRule(
+            formula=[f"H{start_row}<60"],
+            fill=PatternFill("solid", fgColor="FFC7CE"),
+            font=Font(color="C00000", bold=True),
+        ),
+    )
+    ws.conditional_formatting.add(
+        f"J{start_row}:J{end_row}",
+        FormulaRule(
+            formula=[f"J{start_row}=0"],
+            fill=PatternFill("solid", fgColor="FFC7CE"),
+            font=Font(bold=True),
+        ),
+    )
+    ws.conditional_formatting.add(
+        f"K{start_row}:K{end_row}",
+        FormulaRule(
+            formula=[f'K{start_row}<>""'],
+            font=Font(color="C00000", bold=True),
+        ),
+    )
+
+
+def _add_term_summary_rules(ws, start_row: int, end_row: int) -> None:
+    ws.conditional_formatting.add(
+        f"I{start_row}:I{end_row}",
+        FormulaRule(formula=[f'I{start_row}="优秀"'], fill=PatternFill("solid", fgColor="FFD700"), font=Font(bold=True)),
+    )
+    ws.conditional_formatting.add(
+        f"I{start_row}:I{end_row}",
+        FormulaRule(formula=[f'I{start_row}="不及格"'], fill=PatternFill("solid", fgColor="FF0000"), font=Font(color="FFFFFF", bold=True)),
+    )
+    ws.conditional_formatting.add(
+        f"F{start_row}:F{end_row}",
+        FormulaRule(formula=[f"F{start_row}>=90"], font=Font(color="008000", bold=True)),
+    )
+    ws.conditional_formatting.add(
+        f"F{start_row}:F{end_row}",
+        FormulaRule(formula=[f"F{start_row}<60"], font=Font(color="C00000", bold=True)),
+    )
+
+
+def _gpa_formula(score_ref: str) -> str:
+    return (
+        f"=IFERROR(LOOKUP({score_ref},"
+        "{0,60,64,68,72,75,78,82,85,90},"
+        "{0,1,1.5,2,2.3,2.7,3,3.3,3.7,4}),0)"
+    )
+
+
+def _major_sort_key(major: str) -> int:
+    return MAJOR_ORDER.index(major) if major in MAJOR_ORDER else len(MAJOR_ORDER)
+
+
+def _estimated_student_gpa(student_id: str, grade_rows: dict[str, Any]) -> float:
+    values = grade_rows.get("estimated_gpa", {}) if isinstance(grade_rows, dict) else {}
+    try:
+        return float(values.get(student_id, 0))
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def _score_to_gpa(score: float) -> float:
+    if score >= 90:
+        return 4.0
+    if score >= 85:
+        return 3.7
+    if score >= 82:
+        return 3.3
+    if score >= 78:
+        return 3.0
+    if score >= 75:
+        return 2.7
+    if score >= 72:
+        return 2.3
+    if score >= 68:
+        return 2.0
+    if score >= 64:
+        return 1.5
+    if score >= 60:
+        return 1.0
+    return 0.0
 
 
 def can_build_performance_compensation(

@@ -19,6 +19,22 @@ TABLE_NAME_HINTS = (
     "数据",
     "名单",
 )
+REVIEW_FEEDBACK_PREFIXES = (
+    "修正问题",
+    "采用建议",
+    "审查建议",
+    "检查报告",
+    "校验结果",
+)
+GRADE_SCORE_LINE_RE = re.compile(r"^\s*\d{6,}\s*[：:]")
+GRADE_SCORE_PAIR_RE = re.compile(r"\bCS\d{3}\s*\(")
+PROSE_HEADER_HINTS = (
+    "需要按",
+    "公式包含",
+    "计算与",
+    "排序",
+    "总评成绩",
+)
 
 
 def extract_inline_tables(text: str) -> list[dict[str, Any]]:
@@ -130,6 +146,10 @@ def _is_markdown_separator(row: list[str]) -> bool:
 def _looks_like_header(header: list[str], rows: list[list[str]]) -> bool:
     if not rows or any(not str(item).strip() for item in header):
         return False
+    if _looks_like_review_feedback(header):
+        return False
+    if _looks_like_prose_or_score_row(header):
+        return False
     if len(set(_normalize_header(item) for item in header)) != len(header):
         return False
     text_cells = sum(not _looks_numeric(item) for item in header)
@@ -150,6 +170,8 @@ def _infer_table_name(lines: list[str], start: int, sequence: int) -> str:
         match = SECTION_PREFIX_RE.match(candidate)
         candidate = match.group(1).strip() if match else candidate
         candidate = candidate.strip("：:")
+        if any(candidate.startswith(prefix) for prefix in REVIEW_FEEDBACK_PREFIXES):
+            continue
         quoted = re.search(r"[「“\"]([^」”\"]*(?:表|数据))[^」”\"]*[」”\"]", candidate)
         if quoted:
             return _safe_name(quoted.group(1))
@@ -161,6 +183,36 @@ def _infer_table_name(lines: list[str], start: int, sequence: int) -> str:
         if any(marker in candidate for marker in ("要求", "规则", "说明", "创建", "请在")):
             continue
     return f"内嵌数据表{sequence}"
+
+
+def _looks_like_review_feedback(row: list[str]) -> bool:
+    cells = [str(item).strip() for item in row if str(item).strip()]
+    if not cells:
+        return False
+    review_cells = sum(
+        any(cell.startswith(prefix) for prefix in REVIEW_FEEDBACK_PREFIXES)
+        for cell in cells
+    )
+    if review_cells:
+        return True
+    return any(
+        "用户要求" in cell and "工作表" in cell and "缺失" in cell
+        for cell in cells
+    )
+
+
+def _looks_like_prose_or_score_row(row: list[str]) -> bool:
+    cells = [str(item).strip() for item in row if str(item).strip()]
+    if not cells:
+        return False
+    joined = "，".join(cells)
+    if any(GRADE_SCORE_LINE_RE.match(cell) for cell in cells):
+        return True
+    if GRADE_SCORE_PAIR_RE.search(joined):
+        return True
+    if any(hint in joined for hint in PROSE_HEADER_HINTS):
+        return True
+    return False
 
 
 def _safe_name(value: str) -> str:

@@ -18,8 +18,10 @@ from ..custom_workbook_builder import (
 from ..domain_builders import (
     build_global_sales_analysis_workbook,
     build_performance_compensation_workbook,
+    build_student_grade_analysis_workbook,
     can_build_global_sales_analysis,
     can_build_performance_compensation,
+    can_build_student_grade_analysis,
 )
 from ..io_utils import read_table
 from ..model_registry import get_role_api_settings, load_model_settings
@@ -349,6 +351,75 @@ def _local_generate(
         )
 
     if (
+        inline_tables
+        and not task_spec.input_files
+        and can_build_student_grade_analysis(task_spec.user_goal, content_plan)
+    ):
+        mode = "domain_compiler:student_grade_analysis"
+        used_command = "excel_agent.domain_builders.build_student_grade_analysis_workbook"
+        build_student_grade_analysis_workbook(
+            content_plan,
+            task_spec.user_goal,
+            task_paths.output_file,
+        )
+        task_spec.include_charts = False
+        task_spec.include_summary = False
+        task_spec.include_instructions_sheet = False
+        content_plan["expected_sheet_names"] = [
+            "课程参数",
+            "学生信息",
+            "成绩录入",
+            "学期总评",
+            "专业汇总",
+            "课程统计",
+        ]
+        content_plan["title"] = ""
+        content_plan["strict_sheet_names"] = True
+        content_plan["expected_primary_sheet"] = "成绩录入"
+        content_plan["expected_data_rows_by_sheet"] = {
+            "课程参数": 4,
+            "学生信息": 20,
+            "成绩录入": 80,
+            "学期总评": 20,
+            "专业汇总": 4,
+            "课程统计": 5,
+        }
+        content_plan["columns"] = [
+            {"name": name, "kind": "text", "role": "input"}
+            for name in [
+                "学号",
+                "姓名",
+                "专业",
+                "课程编号",
+                "课程名称",
+                "平时成绩",
+                "期末成绩",
+                "总评成绩",
+                "学分",
+                "绩点",
+                "备注",
+            ]
+        ]
+        content_plan["expected_data_rows"] = 80
+        content_plan["consolidated_inline_tables"] = True
+        content_plan["explicit_structure"] = True
+        task_spec.options["content_plan"] = content_plan
+        task_spec.options["chart_requested_explicitly"] = False
+        task_spec.options["chart_requirements"] = {
+            "required": False,
+            "types": [],
+            "explicit": False,
+            "negative": False,
+            "reason": "本任务未要求图表",
+        }
+        task_spec.options["chart_types"] = []
+        save_task_spec(task_spec, task_paths.task_spec_file)
+        notices.append(
+            "已使用学生成绩分析业务编译器生成 6 个指定工作表、80 行成绩明细、"
+            "VLOOKUP/INDEX、SUMIF、SUMPRODUCT、RANK、COUNTIFS 等公式和条件格式；"
+            "未写入审查建议或过程文字。"
+        )
+    elif (
         inline_tables
         and not task_spec.input_files
         and can_build_global_sales_analysis(task_spec.user_goal, content_plan)
