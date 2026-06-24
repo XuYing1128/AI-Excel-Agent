@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import re
 import shutil
+import stat
 from copy import copy
 from pathlib import Path
 from typing import Any
@@ -67,6 +68,9 @@ def fill_template(
     output = Path(output_path)
     output.parent.mkdir(parents=True, exist_ok=True)
     shutil.copy(template, output)
+    # WeChat / downloaded templates are often read-only. The generated output
+    # must be editable so openpyxl can save filled rows and formulas.
+    output.chmod(output.stat().st_mode | stat.S_IWRITE | stat.S_IREAD)
 
     frames = [read_table(path) for path in data_paths]
     combined = pd.concat(frames, ignore_index=True) if frames else pd.DataFrame()
@@ -133,12 +137,17 @@ def _fill_sheet(
     if not header_row or not headers:
         return {"filled": False}
 
-    # Build name->column-index map (1-based) and a normalized lookup.
-    column_index: dict[str, int] = {}
+    # Build name->column-indices map (1-based) and a normalized lookup. Some
+    # teacher templates intentionally repeat a header (for example two
+    # "考场地址" columns); fill all matching columns rather than silently leaving
+    # the later duplicate blank.
+    column_indices: dict[str, list[int]] = {}
     for idx, name in enumerate(headers, start=1):
-        if name and name not in column_index:
-            column_index[name] = idx
-    normalized_index = {_normalize(name): idx for name, idx in column_index.items()}
+        if name:
+            column_indices.setdefault(name, []).append(idx)
+    normalized_index: dict[str, list[int]] = {}
+    for name, indices in column_indices.items():
+        normalized_index.setdefault(_normalize(name), []).extend(indices)
 
     # Wipe any sample rows the template carried below the header so the new
     # data is clean.
@@ -153,15 +162,16 @@ def _fill_sheet(
 
     for offset, record in enumerate(rows, start=header_row + 1):
         for header, value in record.items():
-            target = column_index.get(header)
-            if target is None:
-                target = normalized_index.get(_normalize(header))
-            if target is None:
+            targets = column_indices.get(header)
+            if targets is None:
+                targets = normalized_index.get(_normalize(header))
+            if targets is None:
                 continue
-            cell = ws.cell(offset, target)
-            if isinstance(cell, MergedCell):
-                continue
-            cell.value = value
+            for target in targets:
+                cell = ws.cell(offset, target)
+                if isinstance(cell, MergedCell):
+                    continue
+                cell.value = value
     # After writing N rows, drop any leftover blank rows past the new data so
     # max_row reflects reality and Excel doesn't show hundreds of empty lines.
     last_written = header_row + len(rows)
@@ -254,6 +264,7 @@ def _rows_for_sheet(
                 "",
             )
             record["考点"] = school
+            record["考场"] = assignment.room
             record["考场地址"] = assignment.room
             record["考试日期"] = assignment.date_label
             record["开始时间"] = assignment.start
