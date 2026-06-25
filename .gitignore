@@ -33,6 +33,9 @@ outputs/*.json
 outputs/*.md
 !outputs/.gitkeep
 
+# 本地真实任务验证的运行产物（result.xlsx、run_log、agent_tmp 等），不入库。
+outputs/_*/
+
 # Temporary Office lock files.
 ~$*.xlsx
 ~$*.xlsm

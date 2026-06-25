@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import json
+import shutil
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any, Callable
@@ -192,12 +193,13 @@ def run_agent(
                 }
             )
 
-    if task_paths.output_file.exists() and (built or tool_calls > 0):
-        report = validate_workbook(task_paths.output_file)
+    produced_file = _claim_produced_workbook(task_paths)
+    if produced_file is not None and (built or tool_calls > 0):
+        report = validate_workbook(produced_file)
         if report.get("status") in {"pass", "warn"}:
             result = AgentResult(
                 success=True,
-                output_file=str(task_paths.output_file),
+                output_file=str(produced_file),
                 message="已通过本地工具生成工作簿。",
                 error=None,
                 steps=step,
@@ -277,15 +279,25 @@ def _json_instruction_to_call(content: str) -> Any | None:
 
 def _system_prompt(skills: list[dict[str, str]] | None = None) -> str:
     base = (
-        "你是本地 Excel 表格生成智能体。你不能直接写文件，也不能输出 Markdown 当作结果。"
-        "你必须选择已提供的工具推进任务，常用顺序是生成/处理 → validate_workbook 检查 → finish_task 完成。"
-        "所有计算列必须写 Excel 公式模板，并考虑 IFERROR、空值和除零。"
-        "用户要求图表时必须在方案里包含 charts；用户给出的列、标题、分组、小计、总计优先。"
-        "图表 type 可选：column(竖向柱/对比) bar(横向条) line(趋势) area(面积) "
-        "pie(占比) doughnut(环形占比) radar(多维能力) scatter(相关性) combo(柱+线双轴)；"
-        "按用户用语选最合适的：占比/构成→pie，趋势/走势→line，对比/排名→column，"
-        "多维→radar，相关性→scatter，双指标→combo。每个 chart 要给 category_key 和 value_keys。"
-        "不要复述全量数据，按已确认任务和文件摘要设计结构。"
+        "你是本地 Excel 表格智能体。必须用工具完成，不能把 Markdown 当作结果。\n"
+        "【首选做法】用 run_python 写 Python（pandas/openpyxl 等任意库，可联网）直接构建或修改工作簿"
+        "——想要什么写什么：多工作表、两级表头、公式、条件格式、排序、小计/总计、各类图表都可以。\n"
+        "【就地编辑铁律】如果用户是要在已有文件上改/填（例如“把A表某列填到B表、其它别动”“给这个表加一列”）："
+        "必须 load_workbook(已有文件) 在原工作簿上做最小改动，原样保留未提到的工作表、行列、顺序、样式、公式，"
+        "只动用户明确要改的部分，改完存回 OUTPUT_FILE；严禁新建空白工作簿重造——那会丢掉用户原有的排版和数据。\n"
+        "硬性约定：\n"
+        "1) 上传数据/原文件路径在 INPUT_FILES 列表、模板在 TEMPLATE_FILES 列表（都是绝对路径），直接读取。\n"
+        "2) 最终工作簿必须保存到已注入的变量 OUTPUT_FILE（直接 wb.save(OUTPUT_FILE)），不要改用别的文件名。\n"
+        "3) 新建的计算列写 Excel 公式（=SUM/=AVERAGE/=IF…），不要把算好的结果写死；注意 IFERROR、空值、除零。\n"
+        "4) 图表不要空白：图表引用的单元格要放真实数值；若引用了公式单元格，就 wb.calculation.fullCalcOnLoad=True。\n"
+        "5) 写完用 inspect_workbook(OUTPUT_FILE) 自检（工作表、行数、图表数）；有问题就改代码重跑；满足后调用 finish_task。\n"
+        "图表(openpyxl)：BarChart(type='col'竖柱/'bar'横条)、LineChart(趋势)、AreaChart(面积)、PieChart(占比)、"
+        "DoughnutChart(环形)、RadarChart(多维)、ScatterChart(相关性)、组合用 bar += line(双轴)。"
+        "按用户用语选型：占比/构成→饼图，趋势/走势→折线，对比/排名→柱状，多维→雷达，相关性→散点，双指标→组合。"
+        "用户如果点名了具体图表类型（例如明确说'雷达图''散点图''环形图'），必须严格用该类型，不得替换成柱状图等其它类型。\n"
+        "其它工具(按需)：read_table_summary 先看数据列；fill_template 把数据精确填进上传模板(需要导入原系统时首选)；"
+        "build_workbook 提交结构化方案生成常规单表(简单时可用)；validate_workbook 校验。\n"
+        "简单需求一步写完即可，别过度设计；复杂需求分步：读数据 → 写代码生成 → 自检 → 修正 → 完成。"
     )
     if not skills:
         return base
@@ -305,6 +317,30 @@ def _safe_task_spec(task_spec: TaskSpec) -> dict[str, Any]:
         if key not in {"pasted_data_text"}
     }
     return payload
+
+
+def _claim_produced_workbook(task_paths: TaskPaths) -> Path | None:
+    """认领智能体实际生成的工作簿。
+
+    优先用流水线期望的 output_file；若智能体把文件存成了别的名字（仍在 output
+    目录内），就认领该目录里最新的 .xlsx 并规整为 output_file——避免“明明做对了
+    却因为文件名不符被当成失败、再被兜底重造覆盖”。
+    """
+    expected = task_paths.output_file
+    if expected.exists():
+        return expected
+    output_dir = task_paths.output_dir
+    if not output_dir.exists():
+        return None
+    candidates = [item for item in output_dir.glob("*.xlsx") if item.is_file()]
+    if not candidates:
+        return None
+    newest = max(candidates, key=lambda item: item.stat().st_mtime)
+    try:
+        shutil.copyfile(newest, expected)
+        return expected
+    except OSError:
+        return newest
 
 
 def _workbook_has_charts(blueprint: dict[str, Any]) -> bool:

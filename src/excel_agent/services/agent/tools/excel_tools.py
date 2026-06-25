@@ -100,11 +100,30 @@ def _schema(properties: dict[str, Any]) -> dict[str, Any]:
 def _resolve_task_path(raw_path: str | None, ctx: ToolContext, *, default_output: bool = False) -> Path:
     if not raw_path:
         return ctx.task_paths.output_file if default_output else ctx.task_paths.input_dir
-    candidate = Path(raw_path)
-    if not candidate.is_absolute():
-        candidate = ctx.task_paths.task_dir / raw_path
-    resolved = candidate.resolve()
+    raw = str(raw_path).strip().strip('"').strip("'")
     task_root = ctx.task_paths.task_dir.resolve()
+    candidate = Path(raw)
+    if candidate.is_absolute():
+        resolved = candidate.resolve()
+    else:
+        # 智能体代码的工作目录在 temp_dir，常用 ../output/ 这类相对路径。
+        # 依次按 temp_dir / output_dir / task_dir / input_dir 解析，取落在任务
+        # 目录内且确实存在的那个；都不存在时再按默认落点（用于尚未生成的输出）。
+        resolved = None
+        for base in (
+            ctx.temp_dir,
+            ctx.task_paths.output_dir,
+            ctx.task_paths.task_dir,
+            ctx.task_paths.input_dir,
+        ):
+            trial = (Path(base) / raw).resolve()
+            inside = trial == task_root or trial.is_relative_to(task_root)
+            if inside and trial.exists():
+                resolved = trial
+                break
+        if resolved is None:
+            base = ctx.task_paths.output_file.parent if default_output else ctx.task_paths.task_dir
+            resolved = (Path(base) / Path(raw).name).resolve()
     if not (resolved == task_root or resolved.is_relative_to(task_root)):
         raise PermissionError("工具只能访问当前任务目录中的文件。")
     return resolved

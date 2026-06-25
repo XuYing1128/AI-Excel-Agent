@@ -241,9 +241,30 @@ def _generate_with_model(
                 details=result.to_dict(),
             )
             return result
+        # 智能体已启用却没做成：如实返回失败 + 可重试，绝不偷偷掉到会“重造”的
+        # 旧路径套模板硬凑一个不符合要求的结果（那正是过去“交付的和需求不沾边”的根源）。
+        reason = (agent_result.error or "未知原因").strip()
         notices.append(
-            "自动多步生成未能完成本次任务，已自动切换到兼容生成路径。"
-            f"（反馈：{(agent_result.error or '未知原因')[:120]}）"
+            "这次没能按要求把表做好（常见原因：模型中途报错，或文件没存到指定位置）。"
+            "可以再点一次重试，或把要求说得更具体些；这一版不会用套模板硬凑给你。"
+        )
+        append_run_log_event(
+            task_paths,
+            event="generation_agent_failed",
+            status="error",
+            details={"reason": reason[:300]},
+        )
+        return GenerationResult(
+            success=False,
+            output_file=None,
+            message="智能体未能完成本次任务。",
+            error=reason,
+            used_command="excel_agent.services.agent.orchestrator.run_agent",
+            mode="agent_failed",
+            notices=notices,
+            agent_tool_calls=agent_result.tool_calls,
+            agent_rounds=agent_result.steps,
+            blueprint_file=agent_result.blueprint_file,
         )
 
     agent = generate_with_llm_agent(task_spec, task_paths, settings, progress=progress)

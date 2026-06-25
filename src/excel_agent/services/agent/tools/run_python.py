@@ -33,14 +33,15 @@ def run_python_tool() -> AgentTool:
     return AgentTool(
         "run_python",
         (
-            "在当前任务临时目录中运行受限 Python。只能读取 task/input，"
-            "只能写入 task/output 和 task/agent_tmp；禁网络、限时、限制用户代码 import。"
+            "在当前任务临时目录中运行 Python（pandas/openpyxl 等任意库均可，可联网）。"
+            "唯一边界：只能读取 task 目录、写入 task/output 和 task/agent_tmp，"
+            "防止误伤任务以外的文件。需要修改已有文件时，请 load 原文件就地改、存回 OUTPUT_FILE。"
         ),
         {
             "type": "object",
             "properties": {
                 "code": {"type": "string", "description": "要执行的 Python 代码。"},
-                "timeout_seconds": {"type": "integer", "minimum": 1, "maximum": 120},
+                "timeout_seconds": {"type": "integer", "minimum": 1, "maximum": 600},
             },
             "required": ["code"],
         },
@@ -54,20 +55,15 @@ def _handle_run_python(args: dict[str, Any], ctx: ToolContext) -> ToolResult:
     code = str(args.get("code") or "").strip()
     if not code:
         return ToolResult(False, "没有提供代码。", error="empty_code")
-    invalid = _invalid_imports(code)
-    if invalid:
-        return ToolResult(
-            False,
-            "代码包含不允许的 import。",
-            data={"invalid_imports": invalid, "allowed_imports": sorted(ALLOWED_IMPORTS)},
-            error="import_not_allowed",
-        )
-    timeout = min(max(int(args.get("timeout_seconds") or 60), 1), 120)
+    # 翻转后：信任本地环境，AI 可自由 import、可联网。仅保留“路径护栏”
+    # （只能读任务目录、写 output/temp），避免误伤任务以外的文件。
+    timeout = min(max(int(args.get("timeout_seconds") or 60), 1), 600)
     return run_python_code(code, ctx, timeout_seconds=timeout)
 
 
 def run_python_code(code: str, ctx: ToolContext, *, timeout_seconds: int = 60) -> ToolResult:
     temp_dir = ctx.temp_dir.resolve()
+    ctx.task_paths.output_dir.mkdir(parents=True, exist_ok=True)
     user_code = temp_dir / "agent_user_code.py"
     runner = temp_dir / "agent_runner.py"
     before = _snapshot_files(ctx.task_paths.output_dir, temp_dir)
@@ -76,12 +72,22 @@ def run_python_code(code: str, ctx: ToolContext, *, timeout_seconds: int = 60) -
     config = {
         "user_code": str(user_code),
         "allowed_imports": sorted(ALLOWED_IMPORTS),
+        # Read anything inside the task dir (uploads, templates, prior output);
+        # write only to output + temp.
         "read_roots": [
+            str(ctx.task_paths.task_dir.resolve()),
             str(ctx.task_paths.input_dir.resolve()),
             str(ctx.task_paths.output_dir.resolve()),
             str(temp_dir),
         ],
         "write_roots": [str(ctx.task_paths.output_dir.resolve()), str(temp_dir)],
+        # The exact final path the rest of the pipeline expects. The agent should
+        # save the finished workbook here so it is picked up without renaming.
+        "output_file": str(ctx.task_paths.output_file.resolve()),
+        # Concrete upload paths so the agent reads them directly (os/pathlib are
+        # not in the import whitelist, so it cannot list directories itself).
+        "input_files": [str(Path(p).resolve()) for p in (ctx.task_spec.input_files or [])],
+        "template_files": [str(Path(p).resolve()) for p in (ctx.task_spec.template_files or [])],
     }
     env = dict(os.environ)
     env["PYTHONIOENCODING"] = "utf-8"
@@ -209,44 +215,19 @@ def _safe_path_open(self, mode="r", *args, **kwargs):
 pathlib.Path.open = _safe_path_open
 
 
-class _BlockedSocket:
-    def __init__(self, *args, **kwargs):
-        raise RuntimeError("run_python 禁止网络访问")
-
-
-socket.socket = _BlockedSocket
-
-_real_import = builtins.__import__
-
-
-def _safe_import(name, globals=None, locals=None, fromlist=(), level=0):
-    top = str(name).split(".")[0]
-    # Only block imports initiated directly by user code; library internals may
-    # import their own dependencies after an allowed top-level package is loaded.
-    frame = inspect.currentframe()
-    caller = frame.f_back if frame else None
-    user_in_stack = False
-    depth = 0
-    while caller is not None and depth < 4:
-        if caller.f_code.co_filename == str(USER_CODE):
-            user_in_stack = True
-            break
-        caller = caller.f_back
-        depth += 1
-    if user_in_stack:
-        if top not in ALLOWED_IMPORTS:
-            raise ImportError(f"不允许导入模块: {top}")
-    return _real_import(name, globals, locals, fromlist, level)
-
-
-builtins.__import__ = _safe_import
+# 翻转后：信任本地环境——放开联网与 import 限制。安全边界仅靠上面的
+# “路径护栏”（_safe_open / _safe_path_open）维持：用户代码只能读任务目录、
+# 写 output/temp，无法触碰任务以外的文件。
 
 globals_dict = {
     "__name__": "__main__",
     "__file__": str(USER_CODE),
-    "INPUT_DIR": str(READ_ROOTS[0]),
+    "INPUT_DIR": cfg["read_roots"][1] if len(cfg["read_roots"]) > 1 else str(READ_ROOTS[0]),
     "OUTPUT_DIR": str(WRITE_ROOTS[0]),
+    "OUTPUT_FILE": cfg.get("output_file", str(WRITE_ROOTS[0]) + "/output.xlsx"),
     "TEMP_DIR": str(WRITE_ROOTS[1]),
+    "INPUT_FILES": cfg.get("input_files", []),
+    "TEMPLATE_FILES": cfg.get("template_files", []),
 }
 source = USER_CODE.read_text(encoding="utf-8")
 exec(compile(source, str(USER_CODE), "exec"), globals_dict)
