@@ -113,6 +113,7 @@ def run_agent(
     tool_calls = 0
     last_error = ""
     stalled = 0
+    truncation_retries = 0
 
     for step in range(1, max_steps + 1):
         _progress(progress, "model", f"第 {step} 步：正在判断下一步操作……")
@@ -123,9 +124,20 @@ def run_agent(
             tools=tool_schemas(tool_context),
             tool_choice="auto",
             temperature=0.05,
-            max_tokens=8000,
+            max_tokens=16000,
         )
         if not response.success:
+            # 截断（推理把输出额度占满）不直接放弃：提示模型少分析、直接动手再试。
+            if _is_truncation(response.error) and truncation_retries < 2:
+                truncation_retries += 1
+                messages.append(
+                    {
+                        "role": "user",
+                        "content": "上一步因思考过长被截断。请不要输出大段分析，"
+                        "直接调用 run_python 写最小可用代码完成当前这一步。",
+                    }
+                )
+                continue
             last_error = response.error or "模型调用失败。"
             break
         assistant_message = dict(response.message or {"role": "assistant"})
@@ -291,6 +303,11 @@ def _system_prompt(skills: list[dict[str, str]] | None = None) -> str:
         "3) 新建的计算列写 Excel 公式（=SUM/=AVERAGE/=IF…），不要把算好的结果写死；注意 IFERROR、空值、除零。\n"
         "4) 图表不要空白：图表引用的单元格要放真实数值；若引用了公式单元格，就 wb.calculation.fullCalcOnLoad=True。\n"
         "5) 写完用 inspect_workbook(OUTPUT_FILE) 自检（工作表、行数、图表数）；有问题就改代码重跑；满足后调用 finish_task。\n"
+        "【交付前自检清单】finish 前逐项检查并修好：\n"
+        "  · 公式要算得出值、不报错——计算列用 IFERROR 包裹，注意文本/数字类型、除零、空值，避免 #VALUE!/#DIV/0!/#REF!；\n"
+        "  · 用户要图表时确实建了图，且图引用的是有真实数值的单元格、坐标轴不为空；\n"
+        "  · 数据明细页冻结表头行（ws.freeze_panes）并给表头加自动筛选（ws.auto_filter.ref）；\n"
+        "  · 百分比/比率列设百分比格式、金额列设千分位，列宽适配内容、不要过窄。\n"
         "图表(openpyxl)：BarChart(type='col'竖柱/'bar'横条)、LineChart(趋势)、AreaChart(面积)、PieChart(占比)、"
         "DoughnutChart(环形)、RadarChart(多维)、ScatterChart(相关性)、组合用 bar += line(双轴)。"
         "按用户用语选型：占比/构成→饼图，趋势/走势→折线，对比/排名→柱状，多维→雷达，相关性→散点，双指标→组合。"
@@ -352,6 +369,11 @@ def _workbook_has_charts(blueprint: dict[str, Any]) -> bool:
 def _progress(progress: ProgressCallback | None, stage: str, message: str) -> None:
     if progress:
         progress(stage, message)
+
+
+def _is_truncation(error: str | None) -> bool:
+    text = str(error or "")
+    return "截断" in text or "length" in text.lower()
 
 
 def _matched_skills(task_spec: TaskSpec) -> list[dict[str, str]]:

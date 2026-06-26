@@ -594,12 +594,31 @@ def _finalize_report(report: dict[str, Any], output_json: str | Path | None) -> 
 
 
 def _is_instruction_sheet(name: str) -> bool:
-    return _normalized_name(name) in INSTRUCTION_NAMES
+    normalized = _normalized_name(name)
+    return (
+        normalized in INSTRUCTION_NAMES
+        or "说明" in normalized
+        or "readme" in normalized
+        or "instruction" in normalized
+    )
 
 
 def _is_data_sheet(name: str) -> bool:
     normalized = _normalized_name(name)
-    return normalized in DATA_SHEET_NAMES or "data" in normalized or "输入" in normalized or "数据" in normalized
+    return normalized in DATA_SHEET_NAMES or any(
+        keyword in normalized
+        for keyword in (
+            "data",
+            "输入",
+            "数据",
+            "明细",
+            "记录",
+            "录入",
+            "名册",
+            "清单",
+            "原始",
+        )
+    )
 
 
 def _normalized_name(value: str) -> str:

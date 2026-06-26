@@ -35,6 +35,7 @@ outputs/*.md
 
 # 本地真实任务验证的运行产物（result.xlsx、run_log、agent_tmp 等），不入库。
 outputs/_*/
+outputs/ai_agent_benchmark/
 
 # Temporary Office lock files.
 ~$*.xlsx

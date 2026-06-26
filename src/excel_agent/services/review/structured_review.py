@@ -49,7 +49,7 @@ def _run_one_review(
         system_prompt=system_prompt,
         user_prompt=json.dumps(context, ensure_ascii=False),
         temperature=0.1,
-        max_tokens=900,
+        max_tokens=4000,
         json_mode=True,
     )
     if not response.success:

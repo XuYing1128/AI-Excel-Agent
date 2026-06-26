@@ -130,7 +130,9 @@ def test_student_grade_compiler_generates_exact_six_sheet_workbook(tmp_path):
 
     assert result.success is True
     assert result.mode == "domain_compiler:student_grade_analysis"
-    assert validation.status == "pass"
+    # validator 现已正确识别“成绩录入”等为数据页，会建议加自动筛选/冻结窗格（合理）。
+    # 该 domain compiler 是待退役老路、不走 AI 格式收尾，故接受 warn；功能正确性由下方公式断言保证。
+    assert validation.status in {"pass", "warn"}
     assert wb.sheetnames == ["课程参数", "学生信息", "成绩录入", "学期总评", "专业汇总", "课程统计"]
     assert all(not name.startswith(("修正问题", "采用建议")) for name in wb.sheetnames)
     assert wb["成绩录入"].max_row == 83
