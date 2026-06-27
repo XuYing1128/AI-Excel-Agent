@@ -119,6 +119,7 @@ def run_agent(
     truncation_retries = 0
     recalc_attempts = 0
     last_recalc: dict[str, Any] | None = None
+    trace: list[dict[str, Any]] = []
 
     for step in range(1, max_steps + 1):
         _progress(progress, "model", f"第 {step} 步：正在判断下一步操作……")
@@ -201,12 +202,29 @@ def run_agent(
                     "error": result.get("error"),
                 },
             )
+            trace.append(_trace_tool_entry(step, call.name, call.arguments, result))
 
         if finish_requested:
             # 交卷前真算关卡：用本机 LibreOffice 真算一遍，发现 #VALUE!/循环引用就退回让模型修，
             # 修不好不放行（静态验证器只看公式长相，抓不到这类“真算才发作”的错误）。
             gate = recalc_workbook(task_paths.output_file)
             last_recalc = gate
+            trace.append(
+                {
+                    "step": step,
+                    "kind": "recalc_gate",
+                    "available": gate.get("available"),
+                    "ok": gate.get("ok"),
+                    "error_cells": gate.get("error_cells", [])[:30],
+                    "action": (
+                        "通过放行"
+                        if gate.get("ok")
+                        else "退回让模型修"
+                        if recalc_attempts < MAX_RECALC_FIX
+                        else "修复次数用尽，不放行"
+                    ),
+                }
+            )
             if gate.get("ok"):
                 completed = True
             elif recalc_attempts < MAX_RECALC_FIX:
@@ -249,6 +267,7 @@ def run_agent(
                 }
             )
 
+    _dump_trace(task_paths, trace)
     produced_file = _claim_produced_workbook(task_paths)
     if produced_file is not None and (built or tool_calls > 0):
         report = validate_workbook(produced_file)
@@ -420,6 +439,46 @@ def _claim_produced_workbook(task_paths: TaskPaths) -> Path | None:
         return expected
     except OSError:
         return newest
+
+
+def _trace_tool_entry(
+    step: int, name: str, arguments: dict[str, Any], result: dict[str, Any]
+) -> dict[str, Any]:
+    """把一次工具调用压成给根因诊断看的轨迹条目：保留模型写的代码与工具完整输出，超长截断。"""
+
+    args = dict(arguments or {})
+    if isinstance(args.get("code"), str):
+        args["code"] = args["code"][:8000]
+    if "blueprint" in args:
+        args["blueprint"] = "<blueprint 已省略>"
+    data = result.get("data") or {}
+    slim: dict[str, Any] = {}
+    for key in ("stdout", "stderr", "new_files", "error_cells", "status", "error_count", "warning_count", "ok"):
+        if key in data:
+            value = data[key]
+            slim[key] = value[:4000] if isinstance(value, str) else value
+    return {
+        "step": step,
+        "kind": "tool",
+        "tool": name,
+        "arguments": args,
+        "ok": result.get("ok"),
+        "summary": result.get("summary"),
+        "error": result.get("error"),
+        "data": slim,
+    }
+
+
+def _dump_trace(task_paths: TaskPaths, trace: list[dict[str, Any]]) -> None:
+    """落盘细粒度执行轨迹（模型代码 + 工具完整输出 + 真算关卡），供根因诊断使用。失败不影响主流程。"""
+
+    try:
+        (task_paths.task_dir / "agent_trace.json").write_text(
+            json.dumps({"steps": trace}, ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+    except Exception:
+        pass
 
 
 def _workbook_has_charts(blueprint: dict[str, Any]) -> bool:

@@ -81,3 +81,12 @@ def test_recalc_gate_repairs_circular_then_passes(tmp_path, monkeypatch):
     assert wb["数据"]["B2"].value == "=AVERAGE(A2:A3)"  # 修复确实生效
     log_text = (paths.task_dir / "run_log.json").read_text(encoding="utf-8")
     assert "agent_recalc_gate" in log_text  # 修复链确被触发，而非第 1 轮直接放行
+
+    # 细粒度轨迹应落盘：能看到模型写的代码、真算关卡的退回与放行（供根因诊断）。
+    import json
+
+    trace = json.loads((paths.task_dir / "agent_trace.json").read_text(encoding="utf-8"))["steps"]
+    assert any(s.get("tool") == "run_python" and "code" in (s.get("arguments") or {}) for s in trace)
+    gates = [s for s in trace if s.get("kind") == "recalc_gate"]
+    assert any(g.get("action") == "退回让模型修" for g in gates)
+    assert any(g.get("ok") for g in gates)

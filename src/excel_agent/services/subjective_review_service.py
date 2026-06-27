@@ -181,6 +181,9 @@ def _compact_workbook_summary(summary: dict[str, Any]) -> dict[str, Any]:
                     "headers": item.get("headers", []),
                     "formula_columns": item.get("formula_columns", []),
                     "chart_count": item.get("chart_count", 0),
+                    # 带上冻结/筛选状态，reviewer 才不会因为看不到而瞎猜“未冻结/未筛选”。
+                    "freeze_panes": item.get("freeze_panes"),
+                    "auto_filter": item.get("auto_filter"),
                 }
             )
     return {"sheet_count": summary.get("sheet_count", len(sheets)), "sheets": sheets}

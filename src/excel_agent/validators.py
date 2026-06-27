@@ -336,7 +336,9 @@ def _check_formula_range_coverage(ws, coordinate: str, formula: str, header: dic
     for col1, row1, col2, row2 in RANGE_REF.findall(formula):
         start = int(row1)
         end = int(row2)
-        if start <= header["row"] + 1 and end < data_last_row:
+        # 只对纵向范围（同列、跨行）检查“是否覆盖到数据末行”；横向范围（同一行跨列，
+        # 例如各产品线 =SUM(B2:E2) 算全年合计）本就不该覆盖到末行，跳过以免误判。
+        if col1 == col2 and start < end and start <= header["row"] + 1 and end < data_last_row:
             _add_warning(
                 report,
                 "formula_range_short",
