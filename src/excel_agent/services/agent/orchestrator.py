@@ -17,11 +17,14 @@ from ...task_paths import TaskPaths, append_run_log_event
 from ...task_spec import TaskSpec
 from ...validators import validate_workbook
 from ..custom_api_service import parse_json_object
+from ..recalc import describe_error_cells, recalc_workbook
 from ... import model_registry
 from .tools import ToolContext, tool_map, tool_schemas
 
 
 ProgressCallback = Callable[[str, str], None]
+# 交卷前真算关卡最多触发几轮“真算→退回修复”，超过则不放行（避免反复真算拖太久）。
+MAX_RECALC_FIX = 3
 
 
 @dataclass
@@ -114,6 +117,8 @@ def run_agent(
     last_error = ""
     stalled = 0
     truncation_retries = 0
+    recalc_attempts = 0
+    last_recalc: dict[str, Any] | None = None
 
     for step in range(1, max_steps + 1):
         _progress(progress, "model", f"第 {step} 步：正在判断下一步操作……")
@@ -163,6 +168,7 @@ def run_agent(
             continue
 
         completed = False
+        finish_requested = False
         for call in calls:
             tool_calls += 1
             result = _dispatch_tool(
@@ -175,7 +181,7 @@ def run_agent(
             if call.name in {"build_workbook", "build_rich_workbook"} and result.get("ok"):
                 built = True
             if call.name == "finish_task" and result.get("ok"):
-                completed = True
+                finish_requested = True
             messages.append(
                 {
                     "role": "tool",
@@ -195,9 +201,47 @@ def run_agent(
                     "error": result.get("error"),
                 },
             )
+
+        if finish_requested:
+            # 交卷前真算关卡：用本机 LibreOffice 真算一遍，发现 #VALUE!/循环引用就退回让模型修，
+            # 修不好不放行（静态验证器只看公式长相，抓不到这类“真算才发作”的错误）。
+            gate = recalc_workbook(task_paths.output_file)
+            last_recalc = gate
+            if gate.get("ok"):
+                completed = True
+            elif recalc_attempts < MAX_RECALC_FIX:
+                recalc_attempts += 1
+                error_cells = gate.get("error_cells", [])
+                _progress(
+                    progress,
+                    "build",
+                    f"真算发现 {len(error_cells)} 处公式报错，正在让模型修正……",
+                )
+                messages.append(
+                    {
+                        "role": "user",
+                        "content": (
+                            "真算（按 Excel 实际计算）发现这些单元格报错："
+                            + describe_error_cells(error_cells)
+                            + "。这类报错几乎都是公式逻辑问题：① 跨表统计漏了『工作表名!』前缀，"
+                            "导致在本表内自引用、绕成循环；② 单元格条件/范围引用错位，最后引用到本格"
+                            "自己形成循环。请用 run_python 打开 OUTPUT_FILE 定位并改对这些公式"
+                            "（补全跨表前缀、核对引用的行列），改完存回 OUTPUT_FILE，再调用 finish_task。"
+                        ),
+                    }
+                )
+                append_run_log_event(
+                    task_paths,
+                    event="agent_recalc_gate",
+                    status="warning",
+                    details={"attempt": recalc_attempts, "error_cells": error_cells[:20]},
+                )
+            else:
+                last_error = "真算仍发现公式报错：" + describe_error_cells(gate.get("error_cells", []))
+                break
         if completed:
             break
-        if built:
+        if built and not finish_requested:
             messages.append(
                 {
                     "role": "user",
@@ -208,7 +252,12 @@ def run_agent(
     produced_file = _claim_produced_workbook(task_paths)
     if produced_file is not None and (built or tool_calls > 0):
         report = validate_workbook(produced_file)
-        if report.get("status") in {"pass", "warn"}:
+        # 末尾以真算为权威终检；gate 已算过同一文件就复用，省一次 LibreOffice 启动。
+        final_recalc = last_recalc if last_recalc is not None else recalc_workbook(produced_file)
+        if report.get("status") in {"pass", "warn"} and final_recalc.get("ok", True):
+            notices = ["已自动选择本地工具生成；文件仍经过确定性校验。"]
+            if final_recalc.get("available"):
+                notices.append("已用 LibreOffice 真算复核，公式无 #VALUE!/循环引用等报错。")
             result = AgentResult(
                 success=True,
                 output_file=str(produced_file),
@@ -217,7 +266,7 @@ def run_agent(
                 steps=step,
                 tool_calls=tool_calls,
                 blueprint_file=str(blueprint_path) if blueprint_path.exists() else None,
-                notices=["已自动选择本地工具生成；文件仍经过确定性校验。"],
+                notices=notices,
             )
             append_run_log_event(
                 task_paths,
@@ -226,6 +275,10 @@ def run_agent(
                 details=result.to_dict(),
             )
             return result
+        if not final_recalc.get("ok", True):
+            last_error = last_error or (
+                "真算仍发现公式报错：" + describe_error_cells(final_recalc.get("error_cells", []))
+            )
 
     result = AgentResult(
         success=False,
@@ -294,6 +347,8 @@ def _system_prompt(skills: list[dict[str, str]] | None = None) -> str:
         "你是本地 Excel 表格智能体。必须用工具完成，不能把 Markdown 当作结果。\n"
         "【首选做法】用 run_python 写 Python（pandas/openpyxl 等任意库，可联网）直接构建或修改工作簿"
         "——想要什么写什么：多工作表、两级表头、公式、条件格式、排序、小计/总计、各类图表都可以。\n"
+        "【一段写完】每次 run_python 都是全新独立运行，互不共享变量与 import；需要多步处理时，请在同一段代码里"
+        "一次写完（读数据→计算→生成→保存到 OUTPUT_FILE），不要指望沿用上一次 run_python 里定义的变量。\n"
         "【就地编辑铁律】如果用户是要在已有文件上改/填（例如“把A表某列填到B表、其它别动”“给这个表加一列”）："
         "必须 load_workbook(已有文件) 在原工作簿上做最小改动，原样保留未提到的工作表、行列、顺序、样式、公式，"
         "只动用户明确要改的部分，改完存回 OUTPUT_FILE；严禁新建空白工作簿重造——那会丢掉用户原有的排版和数据。\n"
@@ -308,6 +363,10 @@ def _system_prompt(skills: list[dict[str, str]] | None = None) -> str:
         "  · 用户要图表时确实建了图，且图引用的是有真实数值的单元格、坐标轴不为空；\n"
         "  · 数据明细页冻结表头行（ws.freeze_panes）并给表头加自动筛选（ws.auto_filter.ref）；\n"
         "  · 百分比/比率列设百分比格式、金额列设千分位，列宽适配内容、不要过窄。\n"
+        "【真算关卡】finish_task 后系统会用 LibreOffice 真算一遍；若有单元格算出 #VALUE!/#DIV/0!/#REF! 或"
+        "循环引用，会把具体单元格退回让你改。最常见两类错先避开：① 跨表统计漏写『工作表名!』前缀，在本表里"
+        "算成自引用/循环（在统计表写 =AVERAGE(C2:C13) 多半应是 =AVERAGE(成绩表!C2:C13)）；② 单元格条件/范围"
+        "引用错位、最后引用到本格自己形成循环。\n"
         "图表(openpyxl)：BarChart(type='col'竖柱/'bar'横条)、LineChart(趋势)、AreaChart(面积)、PieChart(占比)、"
         "DoughnutChart(环形)、RadarChart(多维)、ScatterChart(相关性)、组合用 bar += line(双轴)。"
         "按用户用语选型：占比/构成→饼图，趋势/走势→折线，对比/排名→柱状，多维→雷达，相关性→散点，双指标→组合。"

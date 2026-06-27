@@ -174,22 +174,10 @@ def _generate_with_model(
     run (for example, a missing input file).
     """
 
-    # Fast path: when the request already contains structured data tables that we
-    # parsed locally, the deterministic builders reproduce them exactly in
-    # seconds. A slow reasoning model would only truncate its output on a request
-    # this large (and then we'd fall back to exactly this build anyway), so skip
-    # the round-trip and build locally up front.
-    content_plan = task_spec.options.get("content_plan") or {}
-    inline_tables = (
-        content_plan.get("inline_tables", []) if isinstance(content_plan, dict) else []
-    )
-    if inline_tables and not task_spec.input_files:
-        if progress:
-            progress("build", "已识别需求中的数据表，正在用本地规则快速精确生成……")
-        notices.append(
-            "已识别需求中的结构化数据表，直接用本地规则精确生成（比让大模型重述更快更稳）。"
-        )
-        return _local_generate(task_spec, task_paths, progress, notices)
+    # 翻转“稳中求进”：用户把数据表贴进需求里（无上传文件）时不再本地抢跑，交给 AI 当主角——
+    # 它能在复刻数据之外顺手加公式/图表/分析。已解析的结构化表仍在 content_plan 里，AI 可直接
+    # 取用、不必从文字重抄；AI 没做成时如实报失败、可重试（不本地硬凑）。仅当未启用智能体时，
+    # 下面的非 agent 分支才会回到本地确定性生成。
 
     # If the user gave us a template plus data, the only correct output is one
     # that matches that template (often required for the file to be importable).

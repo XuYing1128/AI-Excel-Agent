@@ -1,8 +1,7 @@
-"""受限 Python 子进程工具。"""
+"""本地 Python 运行工具（已松绑：可任意 import、可联网，仅保留路径护栏）。"""
 
 from __future__ import annotations
 
-import ast
 import json
 import os
 import subprocess
@@ -11,22 +10,6 @@ from pathlib import Path
 from typing import Any
 
 from .base import AgentTool, ToolContext, ToolResult
-
-
-ALLOWED_IMPORTS = {
-    "pandas",
-    "numpy",
-    "openpyxl",
-    "datetime",
-    "re",
-    "math",
-    "json",
-    "collections",
-    "itertools",
-    "statistics",
-    "decimal",
-    "csv",
-}
 
 
 def run_python_tool() -> AgentTool:
@@ -71,7 +54,6 @@ def run_python_code(code: str, ctx: ToolContext, *, timeout_seconds: int = 60) -
     runner.write_text(_runner_source(), encoding="utf-8")
     config = {
         "user_code": str(user_code),
-        "allowed_imports": sorted(ALLOWED_IMPORTS),
         # Read anything inside the task dir (uploads, templates, prior output);
         # write only to output + temp.
         "read_roots": [
@@ -137,25 +119,6 @@ def _snapshot_files(*roots: Path) -> set[Path]:
     return files
 
 
-def _invalid_imports(code: str) -> list[str]:
-    try:
-        tree = ast.parse(code)
-    except SyntaxError as exc:
-        return [f"语法错误: {exc.msg}"]
-    invalid: list[str] = []
-    for node in ast.walk(tree):
-        if isinstance(node, ast.Import):
-            for alias in node.names:
-                top = alias.name.split(".")[0]
-                if top not in ALLOWED_IMPORTS and top not in invalid:
-                    invalid.append(top)
-        elif isinstance(node, ast.ImportFrom):
-            top = (node.module or "").split(".")[0]
-            if top and top not in ALLOWED_IMPORTS and top not in invalid:
-                invalid.append(top)
-    return invalid
-
-
 def _runner_source() -> str:
     return r'''
 from __future__ import annotations
@@ -171,7 +134,6 @@ import sys
 
 cfg = json.loads(sys.argv[1])
 USER_CODE = pathlib.Path(cfg["user_code"]).resolve()
-ALLOWED_IMPORTS = set(cfg["allowed_imports"])
 READ_ROOTS = [pathlib.Path(p).resolve() for p in cfg["read_roots"]]
 WRITE_ROOTS = [pathlib.Path(p).resolve() for p in cfg["write_roots"]]
 

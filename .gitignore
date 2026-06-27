@@ -41,3 +41,6 @@ outputs/ai_agent_benchmark/
 ~$*.xlsx
 ~$*.xlsm
 ~$*.docx
+
+# 本地验证脚本的运行产物（_regress/_exam 等输出的 .txt），不入库。
+demo_teaching/*.txt
