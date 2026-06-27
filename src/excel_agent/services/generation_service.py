@@ -255,6 +255,9 @@ def _generate_with_model(
             blueprint_file=agent_result.blueprint_file,
         )
 
+    # 后备旧路径（仅当未启用智能体、或 builder 与所选模型不同源时才走到）：内核翻转后
+    # run_agent 才是“AI 当主角”的主路径；这里保留 JSON 蓝图后备只为兼容不支持工具调用的
+    # 弱模型，默认配置（智能体启用）不会执行到。
     agent = generate_with_llm_agent(task_spec, task_paths, settings, progress=progress)
     if not agent.success:
         if progress:

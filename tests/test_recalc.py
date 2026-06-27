@@ -67,3 +67,56 @@ def test_recalc_passes_clean_workbook(tmp_path):
     report = recalc_workbook(path)
     assert report["ok"] is True
     assert report["error_cells"] == []
+
+
+def _make_ctx(tmp_path):
+    from openpyxl import Workbook
+
+    from excel_agent.services.agent.tools.base import ToolContext
+    from excel_agent.task_paths import create_task_paths
+    from excel_agent.task_spec import TaskSpec
+
+    paths = create_task_paths("generic_table", tmp_path)
+    paths.output_file.parent.mkdir(parents=True, exist_ok=True)
+    Workbook().save(paths.output_file)
+    ctx = ToolContext(task_spec=TaskSpec(task_type="generic_table", user_goal="x"), task_paths=paths)
+    return ctx, paths
+
+
+def test_recalc_check_tool_reports_errors(monkeypatch, tmp_path):
+    import importlib
+
+    et = importlib.import_module("excel_agent.services.agent.tools.excel_tools")
+
+    monkeypatch.setattr(
+        et,
+        "recalc_workbook",
+        lambda path, **kw: {
+            "available": True,
+            "ok": False,
+            "error_cells": [{"sheet": "统计", "cell": "B2", "value": "#VALUE!"}],
+            "detail": "x",
+        },
+    )
+    ctx, paths = _make_ctx(tmp_path)
+    tool = {t.name: t for t in et.excel_tools()}["recalc_check"]
+    result = tool.handler({"path": str(paths.output_file)}, ctx)
+    assert result.ok is False
+    assert "统计!B2=#VALUE!" in result.summary
+
+
+def test_recalc_check_tool_degrades_without_soffice(monkeypatch, tmp_path):
+    import importlib
+
+    et = importlib.import_module("excel_agent.services.agent.tools.excel_tools")
+
+    monkeypatch.setattr(
+        et,
+        "recalc_workbook",
+        lambda path, **kw: {"available": False, "ok": True, "error_cells": [], "detail": "no soffice"},
+    )
+    ctx, paths = _make_ctx(tmp_path)
+    tool = {t.name: t for t in et.excel_tools()}["recalc_check"]
+    result = tool.handler({"path": str(paths.output_file)}, ctx)
+    assert result.ok is True
+    assert "未安装" in result.summary

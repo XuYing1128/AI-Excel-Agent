@@ -19,6 +19,7 @@ from ....schedule_planner import (
 )
 from ....template_filler import fill_template
 from ....validators import inspect_workbook, validate_workbook
+from ...recalc import describe_error_cells, recalc_workbook
 from .base import AgentTool, ToolContext, ToolResult
 
 
@@ -77,6 +78,12 @@ def excel_tools() -> list[AgentTool]:
             "运行确定性工作簿校验，返回 pass/warn/fail 摘要。",
             _schema({"path": {"type": "string"}}),
             _validate,
+        ),
+        AgentTool(
+            "recalc_check",
+            "用 LibreOffice 真算 OUTPUT_FILE，列出算出 #VALUE!/循环引用等错误的单元格（finish 前自查公式用）。",
+            _schema({"path": {"type": "string"}}),
+            _recalc_check,
         ),
         AgentTool(
             "render_preview",
@@ -247,6 +254,28 @@ def _validate(args: dict[str, Any], ctx: ToolContext) -> ToolResult:
         )
     except Exception as exc:
         return ToolResult(False, "校验失败。", error=f"{type(exc).__name__}: {exc}")
+
+
+def _recalc_check(args: dict[str, Any], ctx: ToolContext) -> ToolResult:
+    try:
+        path = _resolve_task_path(str(args.get("path") or ""), ctx, default_output=True)
+        report = recalc_workbook(path)
+        if not report.get("available"):
+            return ToolResult(True, "本机未安装 LibreOffice，已跳过真算自查。", data=report)
+        cells = report.get("error_cells", [])
+        summary = (
+            "真算通过，无 #VALUE!/循环引用。"
+            if not cells
+            else f"真算发现 {len(cells)} 处报错：{describe_error_cells(cells)}"
+        )
+        return ToolResult(
+            bool(report.get("ok")),
+            summary,
+            data={"ok": report.get("ok"), "error_cells": cells[:30]},
+            artifacts=[str(path)],
+        )
+    except Exception as exc:
+        return ToolResult(False, "真算自查失败。", error=f"{type(exc).__name__}: {exc}")
 
 
 def _render_preview(args: dict[str, Any], ctx: ToolContext) -> ToolResult:

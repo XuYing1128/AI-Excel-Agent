@@ -351,7 +351,9 @@ def _system_prompt(skills: list[dict[str, str]] | None = None) -> str:
         "一次写完（读数据→计算→生成→保存到 OUTPUT_FILE），不要指望沿用上一次 run_python 里定义的变量。\n"
         "【就地编辑铁律】如果用户是要在已有文件上改/填（例如“把A表某列填到B表、其它别动”“给这个表加一列”）："
         "必须 load_workbook(已有文件) 在原工作簿上做最小改动，原样保留未提到的工作表、行列、顺序、样式、公式，"
-        "只动用户明确要改的部分，改完存回 OUTPUT_FILE；严禁新建空白工作簿重造——那会丢掉用户原有的排版和数据。\n"
+        "只动用户明确要改的部分，改完存回 OUTPUT_FILE；严禁新建空白工作簿重造——那会丢掉用户原有的排版和数据。"
+        "就地填值时优先把数值直接写进目标单元格；不要为了填一列就新增一张数据表或一堆辅助列，"
+        "确需引用另一个表的数据，用公式直接引用即可，别把整张表复制进来。\n"
         "硬性约定：\n"
         "1) 上传数据/原文件路径在 INPUT_FILES 列表、模板在 TEMPLATE_FILES 列表（都是绝对路径），直接读取。\n"
         "2) 最终工作簿必须保存到已注入的变量 OUTPUT_FILE（直接 wb.save(OUTPUT_FILE)），不要改用别的文件名。\n"
@@ -372,7 +374,8 @@ def _system_prompt(skills: list[dict[str, str]] | None = None) -> str:
         "按用户用语选型：占比/构成→饼图，趋势/走势→折线，对比/排名→柱状，多维→雷达，相关性→散点，双指标→组合。"
         "用户如果点名了具体图表类型（例如明确说'雷达图''散点图''环形图'），必须严格用该类型，不得替换成柱状图等其它类型。\n"
         "其它工具(按需)：read_table_summary 先看数据列；fill_template 把数据精确填进上传模板(需要导入原系统时首选)；"
-        "build_workbook 提交结构化方案生成常规单表(简单时可用)；validate_workbook 校验。\n"
+        "build_workbook 提交结构化方案生成常规单表(简单时可用)；validate_workbook 校验；"
+        "recalc_check 用 LibreOffice 真算 OUTPUT_FILE、提前查出 #VALUE!/循环引用(finish 前自查公式，省得被真算关卡退回)。\n"
         "简单需求一步写完即可，别过度设计；复杂需求分步：读数据 → 写代码生成 → 自检 → 修正 → 完成。"
     )
     if not skills:
