@@ -59,6 +59,7 @@ from excel_agent.preview import (
 from excel_agent.services.api_task_planner import enhance_task_spec_draft
 from excel_agent.services.custom_api_service import test_api_connection
 from excel_agent.services.revision_service import build_revision_task_spec
+from excel_agent.services.diagnostic_report import run_diagnostic_async
 from excel_agent.services.runtime_compat import load_generation_service
 from excel_agent.services.subjective_review_service import run_subjective_review
 from excel_agent.services.validation_service import validate_generated_workbook
@@ -508,6 +509,13 @@ def execute_generation(
             workbook_summary=workbook_summary,
             generation_summary=generation.to_dict(),
             task_paths=task_paths,
+            api_settings=st.session_state.api_settings,
+        )
+        # 每次生成后在后台独立跑根因诊断，落盘 diagnostic_report.md/.json，不阻塞出表与交付。
+        run_diagnostic_async(
+            spec,
+            task_paths,
+            generation_summary=generation.to_dict(),
             api_settings=st.session_state.api_settings,
         )
         status = validation.status if generation.success else "error"

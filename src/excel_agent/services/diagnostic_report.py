@@ -9,6 +9,7 @@
 from __future__ import annotations
 
 import json
+import threading
 from pathlib import Path
 from typing import Any, Callable
 
@@ -104,6 +105,48 @@ def generate_diagnostic_report(
         details={"problem_count": len(report.get("problems", [])), "model": report.get("model")},
     )
     return report
+
+
+def run_diagnostic_async(
+    task_spec: TaskSpec,
+    task_paths: TaskPaths,
+    *,
+    generation_summary: dict[str, Any] | None = None,
+    api_settings: ApiSettings | None = None,
+) -> threading.Thread:
+    """在后台 daemon 线程里跑根因诊断：自己算 校验 + 真算 + 结构再归因，全程不阻塞主流程/出表。
+
+    诊断只读产物、调模型、落盘报告，不触碰 UI，因此放后台线程安全。任何异常都被吞掉，
+    绝不影响表格的生成与交付。
+    """
+
+    def _worker() -> None:
+        try:
+            from ..validators import inspect_workbook, validate_workbook
+            from .recalc import recalc_workbook
+
+            output = Path(task_paths.output_file)
+            if not output.exists():
+                return
+            validation_report = validate_workbook(output)
+            recalc_result = recalc_workbook(output)
+            workbook_summary = inspect_workbook(output)
+            workbook_summary["sheet_count"] = len(workbook_summary.get("sheets", []))
+            generate_diagnostic_report(
+                task_spec,
+                task_paths,
+                validation_report=validation_report,
+                recalc_result=recalc_result,
+                workbook_summary=workbook_summary,
+                generation_summary=generation_summary,
+                api_settings=api_settings,
+            )
+        except Exception:
+            pass  # 后台诊断失败绝不影响主流程
+
+    thread = threading.Thread(target=_worker, name="diagnostic", daemon=True)
+    thread.start()
+    return thread
 
 
 def _build_context(

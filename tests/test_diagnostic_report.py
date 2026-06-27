@@ -84,3 +84,21 @@ def test_diagnosis_disabled_without_reviewer(tmp_path, monkeypatch):
     )
     assert report["enabled"] is False
     assert report["problems"] == []
+
+
+def test_run_diagnostic_async_writes_report(tmp_path, monkeypatch):
+    from openpyxl import Workbook
+
+    from excel_agent.services import recalc as recalc_mod
+
+    # 真算/网络都打桩，验证的是“后台线程能独立跑完并落盘”，不依赖 LibreOffice/网络。
+    monkeypatch.setattr(recalc_mod, "recalc_workbook", lambda p, **k: {"available": True, "ok": True, "error_cells": []})
+    monkeypatch.setattr(dr, "_reviewer_settings", lambda api: ApiSettings())  # 降级，不调网络
+    paths = create_task_paths("generic_table", tmp_path)
+    paths.output_file.parent.mkdir(parents=True, exist_ok=True)
+    Workbook().save(paths.output_file)
+
+    thread = dr.run_diagnostic_async(_spec(), paths)
+    thread.join(timeout=30)
+    assert not thread.is_alive()  # 后台线程独立跑完
+    assert (paths.task_dir / "diagnostic_report.json").exists()  # 报告已落盘
