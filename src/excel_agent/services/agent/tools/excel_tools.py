@@ -308,17 +308,22 @@ def _render_preview(args: dict[str, Any], ctx: ToolContext) -> ToolResult:
 def _finish(args: dict[str, Any], ctx: ToolContext) -> ToolResult:
     output = ctx.task_paths.output_file
     if not output.exists():
-        # run_python 自由生成可能把工作簿写成别的文件名（仍在 output 目录）。这里扫最新 .xlsx
-        # 认领为标准产物，避免 finish_task 误报 output_missing 害模型无谓重试/丢表（与编排层
+        # run_python 自由生成可能把工作簿写成别的文件名。这里先扫 output 目录、
+        # 再扫 agent_tmp（run_python 的默认工作区），认领最新 .xlsx 为标准产物，
+        # 避免 finish_task 误报 output_missing 害模型无谓重试/丢表（与编排层
         # 末尾的 _claim_produced_workbook 同一思路，统一完成判定基准）。
         try:
             import shutil
 
-            candidates = [p for p in ctx.task_paths.output_dir.glob("*.xlsx") if p.is_file()]
-            if candidates:
-                newest = max(candidates, key=lambda p: p.stat().st_mtime)
-                if newest.resolve() != output.resolve():
-                    shutil.copyfile(newest, output)
+            def _newest(directory):
+                if not directory.exists():
+                    return None
+                items = [p for p in directory.glob("*.xlsx") if p.is_file()]
+                return max(items, key=lambda p: p.stat().st_mtime) if items else None
+
+            newest = _newest(ctx.task_paths.output_dir) or _newest(ctx.temp_dir)
+            if newest and newest.resolve() != output.resolve():
+                shutil.copyfile(newest, output)
         except OSError:
             pass
     ok = output.exists()

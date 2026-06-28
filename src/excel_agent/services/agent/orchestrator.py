@@ -392,6 +392,15 @@ def _system_prompt(skills: list[dict[str, str]] | None = None) -> str:
         "DoughnutChart(环形)、RadarChart(多维)、ScatterChart(相关性)、组合用 bar += line(双轴)。"
         "按用户用语选型：占比/构成→饼图，趋势/走势→折线，对比/排名→柱状，多维→雷达，相关性→散点，双指标→组合。"
         "用户如果点名了具体图表类型（例如明确说'雷达图''散点图''环形图'），必须严格用该类型，不得替换成柱状图等其它类型。\n"
+        "【openpyxl 易错 API 速查】以下写法踩过坑，请直接照做，别自创或试错：\n"
+        "  · 清除/重置条件格式：ws.conditional_formatting._cf_rules.clear() ——"
+        "不要写 _cf_rules=[]（它是 OrderedDict 不是 list，赋空 list 会报 setdefault 错），"
+        "也不要 import openpyxl.worksheet.formatting（该模块不存在）。\n"
+        "  · 雷达图(RadarChart)系列标题：每个 series 的 .tx 要用 SeriesLabel 包，"
+        "from openpyxl.chart.series import SeriesLabel（直接赋字符串不会生效）。\n"
+        "  · 组合图双轴：bar+line 组合时，line 系列要设 .y_axis.axId=200 并新建次坐标轴 display_blanks='gap'。\n"
+        "  · 条件格式整行标红：用 FormulaRule，公式里列引用要锁列不锁行（如 $I2='待改进'），ranges 覆盖整行区。\n"
+        "  · 跨表引用：工作表名带空格/括号/特殊字符时，公式里表名必须用单引号包，如 ='销售数据(2026)'!B2。\n"
         "其它工具(按需)：read_table_summary 先看数据列；fill_template 把数据精确填进上传模板(需要导入原系统时首选)；"
         "build_workbook 提交结构化方案生成常规单表(简单时可用)；validate_workbook 校验；"
         "recalc_check 用 LibreOffice 真算 OUTPUT_FILE、提前查出 #VALUE!/循环引用(finish 前自查公式，省得被真算关卡退回)。\n"
@@ -423,17 +432,29 @@ def _claim_produced_workbook(task_paths: TaskPaths) -> Path | None:
     优先用流水线期望的 output_file；若智能体把文件存成了别的名字（仍在 output
     目录内），就认领该目录里最新的 .xlsx 并规整为 output_file——避免“明明做对了
     却因为文件名不符被当成失败、再被兜底重造覆盖”。
+
+    run_python 允许模型写到 agent_tmp（任务目录下的临时工作区），因此当 output
+    目录里没有 xlsx 时，再到 agent_tmp 里找最新的 .xlsx 认领——否则“做对了却报失败”。
     """
     expected = task_paths.output_file
     if expected.exists():
         return expected
-    output_dir = task_paths.output_dir
-    if not output_dir.exists():
+
+    def _newest_xlsx(directory: Path) -> Path | None:
+        if not directory.exists():
+            return None
+        candidates = [item for item in directory.glob("*.xlsx") if item.is_file()]
+        if not candidates:
+            return None
+        return max(candidates, key=lambda item: item.stat().st_mtime)
+
+    # 先认领 output 目录
+    newest = _newest_xlsx(task_paths.output_dir)
+    # output 没有，再认领 agent_tmp（run_python 的默认工作区）
+    if newest is None:
+        newest = _newest_xlsx(task_paths.task_dir / "agent_tmp")
+    if newest is None:
         return None
-    candidates = [item for item in output_dir.glob("*.xlsx") if item.is_file()]
-    if not candidates:
-        return None
-    newest = max(candidates, key=lambda item: item.stat().st_mtime)
     try:
         shutil.copyfile(newest, expected)
         return expected
