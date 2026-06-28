@@ -80,6 +80,9 @@ def recalc_workbook(path: str | Path, *, timeout: int = 120) -> dict[str, Any]:
             ],
             capture_output=True,
             text=True,
+            # LibreOffice 在 Windows 中文环境往 stderr 写 GBK；默认严格解码会刷一屏
+            # UnicodeDecodeError 噪声。errors="replace" 吞掉坏字节（这里本就不使用其输出内容）。
+            errors="replace",
             timeout=timeout,
         )
         produced = list(outdir.glob("*.xlsx"))

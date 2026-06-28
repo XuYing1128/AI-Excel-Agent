@@ -306,10 +306,25 @@ def _render_preview(args: dict[str, Any], ctx: ToolContext) -> ToolResult:
 
 
 def _finish(args: dict[str, Any], ctx: ToolContext) -> ToolResult:
-    ok = ctx.task_paths.output_file.exists()
+    output = ctx.task_paths.output_file
+    if not output.exists():
+        # run_python 自由生成可能把工作簿写成别的文件名（仍在 output 目录）。这里扫最新 .xlsx
+        # 认领为标准产物，避免 finish_task 误报 output_missing 害模型无谓重试/丢表（与编排层
+        # 末尾的 _claim_produced_workbook 同一思路，统一完成判定基准）。
+        try:
+            import shutil
+
+            candidates = [p for p in ctx.task_paths.output_dir.glob("*.xlsx") if p.is_file()]
+            if candidates:
+                newest = max(candidates, key=lambda p: p.stat().st_mtime)
+                if newest.resolve() != output.resolve():
+                    shutil.copyfile(newest, output)
+        except OSError:
+            pass
+    ok = output.exists()
     return ToolResult(
         ok,
         str(args.get("summary") or ("任务已完成。" if ok else "还没有生成文件。")),
-        artifacts=[str(ctx.task_paths.output_file)] if ok else [],
+        artifacts=[str(output)] if ok else [],
         error=None if ok else "output_missing",
     )
