@@ -134,14 +134,14 @@ def inject_styles() -> None:
         """
         <style>
         :root {
-            --brand: #4f46e5;
-            --brand-dark: #4338ca;
-            --brand-soft: #eef2ff;
-            --accent: #6366f1;
-            --ink: #1e2333;
-            --muted: #6b7384;
-            --line: #e7eaf3;
-            --canvas: #f4f6fb;
+            --brand: #2563eb;
+            --brand-dark: #1d4ed8;
+            --brand-soft: #eff4ff;
+            --accent: #3b82f6;
+            --ink: #1f2937;
+            --muted: #6b7280;
+            --line: #e5e7eb;
+            --canvas: #f7f9fc;
             --ok: #16a34a;
             --warn: #d97706;
             --bad: #dc2626;
@@ -150,10 +150,7 @@ def inject_styles() -> None:
             font-family: "Microsoft YaHei", "PingFang SC", "Noto Sans CJK SC", -apple-system, sans-serif;
         }
         .stApp {
-            background:
-                radial-gradient(1100px 480px at 12% -8%, #eef1ff 0%, rgba(238,241,255,0) 55%),
-                radial-gradient(900px 420px at 100% 0%, #eafff4 0%, rgba(234,255,244,0) 50%),
-                var(--canvas);
+            background: var(--canvas);
             color: var(--ink);
         }
         .block-container { max-width: 1320px; padding-top: 1.1rem; padding-bottom: 4rem; padding-left: 2.4rem; padding-right: 2.4rem; }
@@ -164,20 +161,15 @@ def inject_styles() -> None:
 
         /* Hero header */
         .page-head {
-            margin: 6px 0 22px;
-            padding: 30px 34px;
-            background: linear-gradient(120deg, #4f46e5 0%, #6366f1 45%, #7c83f5 100%);
-            border-radius: 22px;
-            box-shadow: 0 18px 40px -18px rgba(79,70,229,.55);
-            position: relative; overflow: hidden;
+            margin: 4px 0 20px;
+            padding: 22px 26px;
+            background: #ffffff;
+            border: 1px solid var(--line);
+            border-radius: 12px;
+            box-shadow: 0 1px 2px rgba(16,24,40,.05);
         }
-        .page-head::after {
-            content: ""; position: absolute; right: -40px; top: -60px;
-            width: 220px; height: 220px; border-radius: 50%;
-            background: rgba(255,255,255,.10);
-        }
-        .page-title { font-size: 28px; line-height: 1.25; font-weight: 800; color: #fff; margin-bottom: 8px; }
-        .page-subtitle { color: rgba(255,255,255,.86); font-size: 14.5px; line-height: 1.7; max-width: 760px; }
+        .page-title { font-size: 23px; line-height: 1.3; font-weight: 700; color: var(--ink); margin-bottom: 6px; }
+        .page-subtitle { color: var(--muted); font-size: 14px; line-height: 1.6; max-width: 760px; }
 
         /* Step indicator */
         .steps { display: flex; gap: 10px; flex-wrap: wrap; margin: 2px 0 18px; }
@@ -199,7 +191,7 @@ def inject_styles() -> None:
         /* Cards */
         div[data-testid="stVerticalBlockBorderWrapper"] {
             background: #fff; border: 1px solid var(--line);
-            border-radius: 18px; box-shadow: 0 10px 30px -22px rgba(30,40,90,.35);
+            border-radius: 12px; box-shadow: 0 1px 2px rgba(16,24,40,.05);
         }
         h1, h2, h3 { color: var(--ink); letter-spacing: -.01em; }
         h3 { font-size: 19px !important; font-weight: 750 !important; }
@@ -209,11 +201,11 @@ def inject_styles() -> None:
             border-radius: 11px; min-height: 44px; font-weight: 700; transition: all .15s ease;
         }
         .stButton > button[kind="primary"], .stDownloadButton > button {
-            background: linear-gradient(120deg, var(--brand) 0%, var(--accent) 100%);
-            border: none; color: #fff; box-shadow: 0 10px 22px -12px rgba(79,70,229,.7);
+            background: var(--brand);
+            border: 1px solid var(--brand); color: #fff; box-shadow: none;
         }
         .stButton > button[kind="primary"]:hover, .stDownloadButton > button:hover {
-            transform: translateY(-1px); box-shadow: 0 14px 26px -12px rgba(79,70,229,.85);
+            background: var(--brand-dark); border-color: var(--brand-dark);
         }
         .stButton > button[kind="secondary"] {
             background: #fff; border: 1px solid var(--line); color: var(--ink);
@@ -244,14 +236,14 @@ def inject_styles() -> None:
 
         /* Plan cards */
         .plan-card {
-            border: 1px solid var(--line); border-radius: 14px; padding: 15px 17px;
-            background: linear-gradient(180deg, #fbfcff 0%, #f7f9ff 100%); min-height: 100px;
+            border: 1px solid var(--line); border-radius: 10px; padding: 14px 16px;
+            background: #fff; min-height: 96px;
         }
-        .plan-label { color: var(--muted); font-size: 12px; margin-bottom: 7px; letter-spacing: .02em; }
-        .plan-value { color: var(--ink); font-size: 15px; line-height: 1.55; font-weight: 700; }
+        .plan-label { color: var(--muted); font-size: 12px; margin-bottom: 6px; }
+        .plan-value { color: var(--ink); font-size: 15px; line-height: 1.5; font-weight: 600; }
         .soft-note {
-            padding: 13px 15px; background: var(--brand-soft); border-left: 3px solid var(--accent);
-            border-radius: 10px; color: #4451b5; line-height: 1.7; font-size: 13.5px;
+            padding: 12px 14px; background: var(--brand-soft); border-left: 3px solid var(--brand);
+            border-radius: 8px; color: #1e40af; line-height: 1.7; font-size: 13.5px;
         }
         </style>
         """,
@@ -308,7 +300,7 @@ def render_steps(active: int) -> None:
     sac.steps(
         items=[sac.StepsItem(title=name) for name in names],
         index=max(0, min(active - 1, len(names) - 1)),
-        color="indigo",
+        color="blue",
         size="sm",
         key="workflow_steps",
     )
