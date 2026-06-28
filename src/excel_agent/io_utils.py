@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 import json
+import os
 import re
 import shutil
 import subprocess
+import sys
 import tempfile
 from datetime import datetime
 from pathlib import Path
@@ -18,6 +20,19 @@ INVALID_SHEET_CHARS = r"[\[\]\:\*\?\/\\]"
 
 
 def project_root() -> Path:
+    """项目根目录。
+
+    开发模式：基于源码文件位置 (src/excel_agent/io_utils.py 的上两级)。
+    打包模式 (PyInstaller frozen)：用可写环境变量优先，其次 exe 同级目录，
+    保证 outputs/data 等用户数据写到可持久化的位置，而非只读的临时解压目录。
+    """
+    if getattr(sys, "frozen", False):
+        # 1) 显式环境变量最高优先（便于高级用户自定义数据目录）
+        env_dir = os.environ.get("AI_EXCEL_AGENT_HOME")
+        if env_dir:
+            return Path(env_dir).resolve()
+        # 2) 默认：exe 所在目录（--onedir 模式下 dist/AI-Excel-Agent/）
+        return Path(sys.executable).resolve().parent
     return Path(__file__).resolve().parents[2]
 
 

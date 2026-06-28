@@ -8,8 +8,16 @@ venv/
 env/
 .env
 data/private/
+# 导出的 API 配置含真实密钥，仅供本地留存，绝不进仓库
+AI-Excel-Agent_API配置.txt
+*_API配置.txt
 build/
 dist/
+# 打包安装包产物（绝不能进仓库：85MB 二进制 + 可能含打包环境信息）
+installer/*.exe
+*.Setup-*.exe
+AI-Excel-Agent-Setup*.exe
+release/
 *.egg-info/
 .DS_Store
 Thumbs.db

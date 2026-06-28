@@ -5,6 +5,11 @@ gatherUsageStats = false
 toolbarMode = "minimal"
 showErrorDetails = "none"
 
+# 关闭开发模式：否则与 server.port 冲突
+# (RuntimeError: server.port does not work when global.developmentMode is true)
+[global]
+developmentMode = false
+
 [server]
 address = "127.0.0.1"
 port = 8501

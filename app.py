@@ -307,7 +307,9 @@ def render_steps(active: int) -> None:
 
 
 def _onboard_marker() -> Path:
-    return Path("config") / ".onboarded"
+    # 基于 project_root() 而非相对路径，保证打包成 exe 后标记写在固定可写位置。
+    from excel_agent.io_utils import project_root
+    return project_root() / "config" / ".onboarded"
 
 
 def show_onboarding_if_first_use() -> None:
