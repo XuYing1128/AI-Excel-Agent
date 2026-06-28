@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import datetime
+from decimal import Decimal
 from pathlib import Path
 from typing import Any
 
@@ -136,11 +138,27 @@ def _resolve_task_path(raw_path: str | None, ctx: ToolContext, *, default_output
     return resolved
 
 
+def _json_safe(obj: Any) -> Any:
+    """把工具返回值里非 JSON 原生类型（datetime/Decimal 等）转成可序列化形式。"""
+    if isinstance(obj, (datetime.datetime, datetime.date, datetime.time)):
+        return obj.isoformat()
+    if isinstance(obj, Decimal):
+        return float(obj)
+    if isinstance(obj, dict):
+        return {str(k): _json_safe(v) for k, v in obj.items()}
+    if isinstance(obj, (list, tuple)):
+        return [_json_safe(v) for v in obj]
+    return obj
+
+
 def _read_table_summary(args: dict[str, Any], ctx: ToolContext) -> ToolResult:
     try:
         path = _resolve_task_path(str(args.get("path") or ""), ctx)
         frame = read_table(path)
         sample = frame.head(5).astype(object).where(frame.notna(), "").to_dict(orient="records")
+        # 日期/时间/Decimal 等非 JSON 原生类型要转成字符串，否则下游 json.dumps 会抛
+        # TypeError（datetime is not JSON serializable）导致整轮生成中断。
+        sample = [_json_safe(row) for row in sample]
         return ToolResult(
             True,
             f"读取 {path.name}：{len(frame)} 行，{len(frame.columns)} 列。",

@@ -188,7 +188,7 @@ def run_agent(
                     "role": "tool",
                     "tool_call_id": call.id,
                     "name": call.name,
-                    "content": json.dumps(result, ensure_ascii=False),
+                    "content": json.dumps(result, ensure_ascii=False, default=str),
                 }
             )
             append_run_log_event(
