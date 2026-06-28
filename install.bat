@@ -16,6 +16,7 @@ if not exist ".venv\Scripts\python.exe" (
 
 ".venv\Scripts\python.exe" -m pip install --disable-pip-version-check -e ".[dev]"
 if errorlevel 1 goto :failed
+echo ok> ".venv\.installed"
 
 echo.
 echo Installation completed. Double-click start.bat to launch the local app.

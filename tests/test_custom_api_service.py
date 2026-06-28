@@ -147,3 +147,37 @@ def test_custom_api_retries_truncated_tool_arguments(monkeypatch):
 
     assert result.success is True
     assert len(calls) == 2
+
+
+def test_custom_api_retries_direct_when_proxy_fails(monkeypatch):
+    calls = []
+
+    def fake_post(url, headers, json, timeout):
+        calls.append(("proxy", url))
+        raise service.requests.exceptions.ProxyError("bad proxy")
+
+    class FakeSession:
+        trust_env = True
+
+        def post(self, url, headers, json, timeout):
+            calls.append(("direct", url, self.trust_env))
+            return FakeResponse()
+
+    monkeypatch.setattr(service.requests, "post", fake_post)
+    monkeypatch.setattr(service.requests, "Session", FakeSession)
+    settings = ApiSettings(
+        enabled=True,
+        base_url="https://example.com/v1",
+        api_key="secret",
+        model="example-model",
+    )
+
+    result = service.chat_completion(
+        settings,
+        system_prompt="s",
+        user_prompt="u",
+    )
+
+    assert result.success is True
+    assert calls[0][0] == "proxy"
+    assert calls[1] == ("direct", "https://example.com/v1/chat/completions", False)

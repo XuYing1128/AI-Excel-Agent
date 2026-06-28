@@ -9,7 +9,17 @@ from pathlib import Path
 from typing import Any
 
 from openpyxl import Workbook, load_workbook
-from openpyxl.chart import BarChart, LineChart, PieChart, Reference
+from openpyxl.chart import (
+    AreaChart,
+    BarChart,
+    DoughnutChart,
+    LineChart,
+    PieChart,
+    RadarChart,
+    Reference,
+    ScatterChart,
+    Series,
+)
 from openpyxl.formatting.rule import CellIsRule, FormulaRule
 from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
 from openpyxl.utils import get_column_letter
@@ -28,7 +38,18 @@ PROHIBITED_FORMULA_TOKENS = {
     "FILTERXML",
 }
 ALLOWED_COLUMN_TYPES = {"text", "number", "money", "percentage", "date", "integer"}
-ALLOWED_CHART_TYPES = {"bar", "column", "line", "pie"}
+ALLOWED_CHART_TYPES = {
+    "bar",
+    "column",
+    "line",
+    "area",
+    "pie",
+    "doughnut",
+    "radar",
+    "scatter",
+    "combo",
+}
+ROUND_CHART_TYPES = {"pie", "doughnut"}
 THIN_GRAY = Side(style="thin", color="B7C2D0")
 
 
@@ -38,14 +59,38 @@ def build_rich_workbook(
     *,
     require_charts: bool = False,
 ) -> Path:
-    plan = normalize_blueprint(blueprint)
+    workbook_plan = normalize_workbook_blueprint(blueprint)
     output_path = ensure_output_path(output, "智能生成表格.xlsx")
+    wb = Workbook()
+    wb.remove(wb.active)
+    used_names: set[str] = set()
+    for index, plan in enumerate(workbook_plan["sheets"]):
+        sheet_name = _unique_sheet_name(plan["sheet_name"], used_names)
+        used_names.add(sheet_name)
+        plan["sheet_name"] = sheet_name
+        ws = wb.create_sheet(sheet_name)
+        _populate_rich_sheet(
+            wb,
+            ws,
+            plan,
+            require_charts=require_charts and index == len(workbook_plan["sheets"]) - 1,
+        )
+    # Recompute formulas on open so formula cells (and any chart that reads them)
+    # show real values in Excel/WPS instead of zeros before a manual recalc.
+    wb.calculation.fullCalcOnLoad = True
+    wb.save(output_path)
+    return output_path
+
+
+def _populate_rich_sheet(
+    wb,
+    ws,
+    plan: dict[str, Any],
+    *,
+    require_charts: bool = False,
+) -> None:
     columns = plan["columns"]
     records = _sort_records(plan["records"], plan.get("sort", []), columns)
-
-    wb = Workbook()
-    ws = wb.active
-    ws.title = plan["sheet_name"]
     column_map = {item["key"]: index for index, item in enumerate(columns, start=1)}
     max_col = len(columns)
 
@@ -147,8 +192,41 @@ def build_rich_workbook(
         chart_edge = get_column_letter(min(max_col + 14, 40))
         ws.print_area = f"A1:{chart_edge}{max(last_row, 20)}"
 
-    wb.save(output_path)
-    return output_path
+
+def normalize_workbook_blueprint(blueprint: dict[str, Any]) -> dict[str, Any]:
+    """Normalize legacy one-sheet plans and workbook-level multi-sheet plans."""
+
+    if not isinstance(blueprint, dict):
+        raise ValueError("工作簿方案必须是 JSON 对象。")
+    raw_sheets = blueprint.get("sheets")
+    if not isinstance(raw_sheets, list) or not raw_sheets:
+        return {
+            "title": str(blueprint.get("title") or "智能生成表格"),
+            "sheets": [normalize_blueprint(blueprint)],
+        }
+    root_title = str(blueprint.get("title") or "智能生成表格").strip()[:100]
+    sheets: list[dict[str, Any]] = []
+    for index, raw_sheet in enumerate(raw_sheets[:12], start=1):
+        if not isinstance(raw_sheet, dict):
+            continue
+        candidate = dict(raw_sheet)
+        candidate.setdefault("title", candidate.get("sheet_name") or root_title)
+        candidate.setdefault("sheet_name", candidate.get("name") or f"工作表{index}")
+        # Tolerate the model dropping `columns` on one sheet of a multi-sheet
+        # plan: skip that sheet instead of failing the whole job.
+        try:
+            sheets.append(normalize_blueprint(candidate))
+        except ValueError:
+            continue
+    if not sheets:
+        raise ValueError("工作簿方案的 sheets 中没有可用工作表。")
+    return {"title": root_title, "sheets": sheets}
+
+
+def _normalize_key_token(value: Any) -> str:
+    """Loosely normalise a column key/label so different spellings match."""
+
+    return re.sub(r"[\s（）()_\-—:：]", "", str(value or "")).lower()
 
 
 def normalize_blueprint(blueprint: dict[str, Any]) -> dict[str, Any]:
@@ -165,19 +243,36 @@ def normalize_blueprint(blueprint: dict[str, Any]) -> dict[str, Any]:
         raise ValueError("工作簿方案必须包含 columns。")
     columns: list[dict[str, Any]] = []
     keys: set[str] = set()
+    alias_to_key: dict[str, str] = {}
     for index, raw in enumerate(raw_columns[:40], start=1):
         if not isinstance(raw, dict):
             continue
-        key = str(raw.get("key") or f"col_{index}").strip()
-        if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", key):
+        # Models name columns inconsistently ("key"/"field"/"id" and
+        # "label"/"name"/"title"/"header"/"列名"). Accept all so the column text
+        # is not lost and records can still be matched to columns.
+        raw_key = raw.get("key") or raw.get("field") or raw.get("id")
+        label_source = (
+            raw.get("label")
+            or raw.get("name")
+            or raw.get("title")
+            or raw.get("header")
+            or raw.get("列名")
+            or raw.get("列")
+        )
+        key = str(raw_key or "").strip()
+        if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", key) or key in keys:
             key = f"col_{index}"
-        if key in keys:
-            raise ValueError(f"列 key 重复: {key}")
         keys.add(key)
-        label = str(raw.get("label") or key).strip()[:60]
+        label = str(label_source or key).strip()[:60]
         column_type = str(raw.get("type") or "text").lower()
         if column_type not in ALLOWED_COLUMN_TYPES:
             column_type = "text"
+        # Map every form the model might have used as a record key back to this
+        # column's real key, so records keyed by the Chinese label still land.
+        for alias in (raw_key, label_source, label, key):
+            token = _normalize_key_token(alias)
+            if token and token not in alias_to_key:
+                alias_to_key[token] = key
         columns.append(
             {
                 "key": key,
@@ -188,9 +283,21 @@ def normalize_blueprint(blueprint: dict[str, Any]) -> dict[str, Any]:
                 "number_format": str(raw.get("number_format") or "").strip(),
             }
         )
-    records = blueprint.get("records")
-    if not isinstance(records, list):
-        records = []
+    raw_records = blueprint.get("records")
+    if not isinstance(raw_records, list):
+        raw_records = []
+    records = []
+    for item in raw_records[:10000]:
+        if not isinstance(item, dict):
+            continue
+        remapped: dict[str, Any] = {}
+        for record_key, value in item.items():
+            if record_key in keys:
+                remapped[record_key] = value
+                continue
+            mapped = alias_to_key.get(_normalize_key_token(record_key))
+            remapped[mapped or record_key] = value
+        records.append(remapped)
     normalized = {
         "title": title,
         "sheet_name": sheet_name or "数据",
@@ -198,7 +305,7 @@ def normalize_blueprint(blueprint: dict[str, Any]) -> dict[str, Any]:
         "header_groups": _normalize_header_groups(
             blueprint.get("header_groups"), keys
         ),
-        "records": [dict(item) for item in records[:10000] if isinstance(item, dict)],
+        "records": records,
         "sort": list(blueprint.get("sort") or []),
         "group_subtotals": _normalize_summary_config(
             blueprint.get("group_subtotals"), keys
@@ -513,25 +620,17 @@ def _add_chart(
 ) -> None:
     if not body_rows:
         return
-    chart_type = spec.get("type", "column")
-    chart = (
-        LineChart()
-        if chart_type == "line"
-        else PieChart()
-        if chart_type == "pie"
-        else BarChart()
-    )
-    if chart_type == "column" and isinstance(chart, BarChart):
-        chart.type = "col"
-    chart.title = spec.get("title") or "数据图表"
-    chart.height = float(spec.get("height") or 8)
-    chart.width = float(spec.get("width") or 15)
+    chart_type = str(spec.get("type", "column")).lower()
+    if chart_type not in ALLOWED_CHART_TYPES:
+        chart_type = "column"
     category_key = spec.get("category_key")
-    value_keys = [
-        key for key in spec.get("value_keys", []) if key in column_map
-    ]
+    value_keys = [key for key in spec.get("value_keys", []) if key in column_map]
     if category_key not in column_map or not value_keys:
         return
+
+    # Stable helper sheet: column 1 = category, columns 2.. = numeric series. All
+    # chart types read from here so the data never depends on un-recalculated
+    # formulas (which is what produces blank charts in WPS / web Office).
     helper = _chart_helper_sheet(ws.parent)
     helper.cell(1, 1, ws.cell(data_start - 1, column_map[category_key]).value)
     for index, key in enumerate(value_keys, start=2):
@@ -550,26 +649,112 @@ def _add_chart(
                 raw = ws.cell(source_row, column_map[key]).value
                 value = raw if not (isinstance(raw, str) and raw.startswith("=")) else 0
             helper.cell(helper_row, index, value)
-    cats = Reference(helper, min_col=1, min_row=2, max_row=1 + len(body_rows))
-    for index, _key in enumerate(value_keys, start=2):
-        data = Reference(
-            helper,
-            min_col=index,
-            min_row=1,
-            max_row=1 + len(body_rows),
-        )
-        chart.add_data(data, titles_from_data=True)
-    chart.set_categories(cats)
-    if len(value_keys) == 1:
-        chart.legend = None
+
+    rows = len(body_rows)
+    if chart_type == "scatter":
+        chart = _build_scatter_chart(helper, value_keys, rows)
+    elif chart_type == "combo":
+        chart = _build_combo_chart(helper, value_keys, rows)
     else:
-        chart.legend.position = "r"
-    if hasattr(chart, "y_axis"):
+        chart = _build_category_chart(chart_type, helper, value_keys, rows)
+    if chart is None:
+        return
+
+    chart.title = spec.get("title") or "数据图表"
+    chart.height = float(spec.get("height") or 8)
+    chart.width = float(spec.get("width") or 16)
+    chart.style = 10
+    if getattr(chart, "legend", None) is not None:
+        if len(value_keys) == 1 and chart_type not in ROUND_CHART_TYPES:
+            chart.legend = None
+        else:
+            chart.legend.position = "r"
+    if chart_type not in ROUND_CHART_TYPES and chart_type != "scatter" and hasattr(
+        chart, "y_axis"
+    ):
         chart.y_axis.numFmt = "#,##0"
     position = str(spec.get("position") or "")
     if not re.fullmatch(r"[A-Z]{1,3}[1-9]\d*", position):
         position = f"{get_column_letter(len(column_map) + 2)}3"
     ws.add_chart(chart, position)
+
+
+def _build_category_chart(chart_type: str, helper, value_keys: list[str], rows: int):
+    """Charts that share a category axis: column/bar/line/area/pie/doughnut/radar."""
+
+    cats = Reference(helper, min_col=1, min_row=2, max_row=1 + rows)
+    if chart_type == "line":
+        chart = LineChart()
+    elif chart_type == "area":
+        chart = AreaChart()
+    elif chart_type == "pie":
+        chart = PieChart()
+    elif chart_type == "doughnut":
+        chart = DoughnutChart()
+    elif chart_type == "radar":
+        chart = RadarChart()
+        chart.type = "marker"
+    else:  # column / bar
+        chart = BarChart()
+        chart.type = "bar" if chart_type == "bar" else "col"
+        chart.grouping = "clustered"
+        chart.overlap = -10
+        chart.gapWidth = 80
+    if chart_type in ROUND_CHART_TYPES:
+        # Pie / doughnut visualise a single series of proportions.
+        chart.add_data(Reference(helper, min_col=2, min_row=1, max_row=1 + rows),
+                       titles_from_data=True)
+    else:
+        for index in range(2, 2 + len(value_keys)):
+            chart.add_data(Reference(helper, min_col=index, min_row=1, max_row=1 + rows),
+                           titles_from_data=True)
+    chart.set_categories(cats)
+    return chart
+
+
+def _build_scatter_chart(helper, value_keys: list[str], rows: int):
+    """X-Y scatter: first numeric column is X, each remaining column is a Y series."""
+
+    chart = ScatterChart()
+    chart.x_axis.delete = False
+    chart.y_axis.delete = False
+    chart.x_axis.title = helper.cell(1, 2).value
+    if len(value_keys) >= 2:
+        x_values = Reference(helper, min_col=2, min_row=2, max_row=1 + rows)
+        series_cols = range(3, 2 + len(value_keys))
+    else:
+        x_values = Reference(helper, min_col=1, min_row=2, max_row=1 + rows)
+        series_cols = range(2, 3)
+    for index in series_cols:
+        y_values = Reference(helper, min_col=index, min_row=1, max_row=1 + rows)
+        series = Series(y_values, x_values, title_from_data=True)
+        series.marker.symbol = "circle"
+        series.graphicalProperties.line.noFill = True
+        chart.series.append(series)
+    return chart
+
+
+def _build_combo_chart(helper, value_keys: list[str], rows: int):
+    """Combo: first series as columns, remaining series as lines on a second axis."""
+
+    cats = Reference(helper, min_col=1, min_row=2, max_row=1 + rows)
+    bar = BarChart()
+    bar.type = "col"
+    bar.grouping = "clustered"
+    bar.gapWidth = 80
+    bar.add_data(Reference(helper, min_col=2, min_row=1, max_row=1 + rows),
+                 titles_from_data=True)
+    bar.set_categories(cats)
+    if len(value_keys) >= 2:
+        line = LineChart()
+        for index in range(3, 2 + len(value_keys)):
+            line.add_data(Reference(helper, min_col=index, min_row=1, max_row=1 + rows),
+                          titles_from_data=True)
+        line.set_categories(cats)
+        line.y_axis.axId = 200
+        bar.y_axis.crosses = "max"
+        bar += line
+    return bar
 
 
 def _chart_helper_sheet(wb):
@@ -827,23 +1012,47 @@ def _normalize_charts(value: Any, keys: set[str]) -> list[dict[str, Any]]:
     return result
 
 
-def _default_chart(columns: list[dict[str, Any]]) -> dict[str, Any]:
+def build_default_chart_spec(
+    columns: list[dict[str, Any]],
+    chart_type: str = "column",
+) -> dict[str, Any]:
+    """A sensible chart spec for a column set: category = first text column,
+    series = the input numeric columns (a genuine comparison)."""
+
+    if not columns:
+        return {}
     text_key = next(
         (item["key"] for item in columns if item["type"] == "text"),
         columns[0]["key"],
     )
-    value_keys = [
+    numeric_types = {"number", "money", "integer"}
+    input_numeric = [
         item["key"]
         for item in columns
-        if item["type"] in {"number", "money", "integer"}
-    ][-1:]
+        if item["type"] in numeric_types and not item.get("formula")
+    ]
+    if not input_numeric:
+        input_numeric = [
+            item["key"]
+            for item in columns
+            if item["type"] in numeric_types | {"percentage"}
+        ]
+    value_keys = input_numeric[:4] or [columns[-1]["key"]]
+    chart_type = chart_type if chart_type in ALLOWED_CHART_TYPES else "column"
+    # Pie / doughnut show one proportion series.
+    if chart_type in ROUND_CHART_TYPES:
+        value_keys = value_keys[:1]
     return {
-        "type": "column",
-        "title": "核心数据对比",
+        "type": chart_type,
+        "title": "数据对比",
         "category_key": text_key,
         "value_keys": value_keys,
         "position": f"{get_column_letter(len(columns) + 2)}3",
     }
+
+
+def _default_chart(columns: list[dict[str, Any]]) -> dict[str, Any]:
+    return build_default_chart_spec(columns, "column")
 
 
 def _contiguous_ranges(rows: list[int]) -> list[tuple[int, int]]:
@@ -868,6 +1077,19 @@ def _number_format(column_type: str) -> str:
 
 def _default_width(label: str) -> float:
     return min(max(len(label) * 2 + 3, 10), 24)
+
+
+def _unique_sheet_name(value: str, used: set[str]) -> str:
+    base = re.sub(r"[\[\]:*?/\\]", "_", str(value)).strip()[:31] or "数据"
+    if base not in used:
+        return base
+    counter = 2
+    while True:
+        suffix = f"_{counter}"
+        candidate = f"{base[:31 - len(suffix)]}{suffix}"
+        if candidate not in used:
+            return candidate
+        counter += 1
 
 
 def _sort_value(value: Any) -> tuple[int, Any]:

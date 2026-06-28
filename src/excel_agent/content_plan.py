@@ -6,13 +6,34 @@ import re
 from pathlib import Path
 from typing import Any
 
+from .inline_table_parser import extract_inline_tables, primary_inline_table
 from .task_paths import sanitize_filename
 
 
-TITLE_RE = re.compile(r"(?:主题|标题|表名)\s*[：:]\s*([^\r\n。]+)")
+TITLE_RE = re.compile(
+    r"(?:主题|标题|表名)\s*[：:]\s*(?:[「“\"]([^」”\"\r\n]+)[」”\"]|([^\r\n。]+))"
+)
+TITLE_ACTION_RE = re.compile(
+    r"(?:显示|命名为|名称为)\s*[「“\"]([^」”\"\r\n]+)[」”\"]"
+)
 COLUMNS_RE = re.compile(
     r"(?:(?:包含|包括|需要|表格需包含)(?:以下)?(?:这些)?列|列为|表头为|字段为)"
-    r"\s*[：:]\s*([^\r\n。]+)"
+    r"\s*[：:]\s*([^。；;\r\n]+)"
+)
+COLUMN_CLAUSE_STOP_WORDS = (
+    "公式",
+    "计算",
+    "排序",
+    "降序",
+    "升序",
+    "汇总",
+    "小计",
+    "总计",
+    "生成",
+    "图表",
+    "柱状",
+    "折线",
+    "饼图",
 )
 DATE_LINE_RE = re.compile(r"^\s*(\d{1,2}月\d{1,2}日)\s*$")
 WEATHER_LINE_RE = re.compile(
@@ -73,7 +94,12 @@ def extract_title(prompt: str) -> str:
     text = str(prompt or "").strip()
     match = TITLE_RE.search(text)
     if match:
-        return match.group(1).strip()
+        candidate = next(group for group in match.groups() if group).strip()
+        quoted = re.search(r"[「“\"]([^」”\"]+)[」”\"]", candidate)
+        return quoted.group(1).strip() if quoted else candidate
+    action_match = TITLE_ACTION_RE.search(text)
+    if action_match:
+        return action_match.group(1).strip()
     for line in text.splitlines():
         clean = line.strip(" \t-*#")
         if not clean:
@@ -93,8 +119,13 @@ def build_local_content_plan(
     """Build a conservative plan from explicit structure and inline records."""
 
     text = str(prompt or "").strip()
-    columns = extract_requested_columns(text)
-    weather_records = extract_weather_records(text)
+    data_text = _strip_revision_sections(text)
+    columns = extract_requested_columns(data_text)
+    inline_tables = extract_inline_tables(data_text)
+    primary_table = primary_inline_table(inline_tables)
+    if primary_table and not columns:
+        columns = list(primary_table.get("columns") or [])
+    weather_records = extract_weather_records(data_text)
     if weather_records and not columns:
         columns = [
             "日期",
@@ -110,21 +141,26 @@ def build_local_content_plan(
     records: list[dict[str, Any]] = []
     if weather_records:
         records = [_weather_record_for_columns(item, columns) for item in weather_records]
+    elif primary_table:
+        records = [dict(item) for item in primary_table.get("records", [])]
     elif columns:
-        records = extract_delimited_records(text, columns)
+        records = extract_delimited_records(data_text, columns)
 
     explicit_title_match = TITLE_RE.search(text)
+    explicit_title_match = explicit_title_match or TITLE_ACTION_RE.search(text)
     title = extract_title(text)
     if not title:
         title = Path(suggest_output_name(text, task_type)).stem
 
     formula_rules = infer_formula_rules(text, columns)
     summary_rules = infer_summary_rules(text, columns, records)
-    explicit_structure = bool(columns and (records or formula_rules or "列" in text))
+    explicit_structure = bool(
+        columns and (records or formula_rules or inline_tables or "列" in text)
+    )
     single_sheet = not any(
         word in text.lower()
         for word in ("汇总页", "summary sheet", "dashboard", "仪表盘", "数据源页")
-    )
+    ) and len(inline_tables) <= 1
     sheet_name = _safe_sheet_name(title)
     return {
         "title": title,
@@ -146,12 +182,38 @@ def build_local_content_plan(
         "records": records,
         "formula_rules": formula_rules,
         "summary_rules": summary_rules,
+        "inline_tables": inline_tables,
+        "primary_table_name": (
+            str(primary_table.get("name") or "") if primary_table else ""
+        ),
+        "expected_sheet_names": [
+            str(item.get("name") or "") for item in inline_tables
+        ],
         "notes": _extract_plain_notes(text),
         "expected_data_rows": len(records),
         "explicit_structure": explicit_structure,
         "source": "local_rules",
         "input_file_names": [Path(item).name for item in (input_files or [])],
     }
+
+
+def _strip_revision_sections(text: str) -> str:
+    """Keep revision/review prose from being parsed as user data tables."""
+
+    markers = (
+        "\n本次修改要求：",
+        "\n本次修改要求:",
+        "\n修正问题：",
+        "\n修正问题:",
+        "\n采用建议：",
+        "\n采用建议:",
+    )
+    end = len(text)
+    for marker in markers:
+        index = text.find(marker)
+        if index != -1:
+            end = min(end, index)
+    return text[:end].strip()
 
 
 def merge_model_content_plan(
@@ -206,10 +268,16 @@ def extract_requested_columns(prompt: str) -> list[str]:
     raw = re.sub(r"^(?:为|是)\s*", "", raw)
     values = [
         re.sub(r"^\d+[.、]\s*", "", item).strip(" `\"“”'")
-        for item in re.split(r"[、，,；;|]", raw)
+        for item in re.split(r"[、，,|]", raw)
     ]
-    values = [item for item in values if item and len(item) <= 40]
-    return list(dict.fromkeys(values))
+    cleaned: list[str] = []
+    for item in values:
+        if not item:
+            continue
+        if len(item) > 40 or any(word in item for word in COLUMN_CLAUSE_STOP_WORDS):
+            break
+        cleaned.append(item)
+    return list(dict.fromkeys(cleaned))
 
 
 def extract_weather_records(prompt: str) -> list[dict[str, Any]]:

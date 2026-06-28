@@ -7,6 +7,7 @@ from copy import deepcopy
 from pathlib import Path
 
 from ..api_settings import ApiSettings
+from ..chart_spec import analyze_chart_requirements
 from ..content_plan import suggest_output_name
 from ..task_spec import TaskSpec
 from ..task_spec_builder import build_task_spec_draft
@@ -51,6 +52,16 @@ def build_revision_task_spec(
         revised.user_goal = combined_prompt
 
     _apply_local_revision_rules(revised, request)
+    if current.include_charts and not _chart_request_is_negative(request):
+        revised.include_charts = True
+        current_chart_req = deepcopy(current.options.get("chart_requirements") or {})
+        if current_chart_req:
+            revised.options["chart_requirements"] = current_chart_req
+            revised.options["chart_types"] = list(current_chart_req.get("types") or [])
+        revised.options["chart_requested_explicitly"] = bool(
+            revised.options.get("chart_requested_explicitly")
+            or current.options.get("chart_requested_explicitly")
+        )
     revised.input_files = list(current.input_files)
     revised.user_answers = deepcopy(current.user_answers)
     revised.user_answers["revision_request"] = request
@@ -76,10 +87,17 @@ def _apply_local_revision_rules(spec: TaskSpec, request: str) -> None:
     if not isinstance(plan, dict):
         plan = {}
 
-    if any(word in lowered for word in ("删除图表", "去掉图表", "不要图表", "不需要图表")):
+    chart_req = analyze_chart_requirements(request)
+    if chart_req.get("negative"):
         spec.include_charts = False
-    elif any(word in lowered for word in ("增加图表", "新增图表", "需要图表")):
+        spec.options["chart_requested_explicitly"] = False
+        spec.options["chart_requirements"] = chart_req
+        spec.options["chart_types"] = []
+    elif chart_req.get("required"):
         spec.include_charts = True
+        spec.options["chart_requested_explicitly"] = True
+        spec.options["chart_requirements"] = chart_req
+        spec.options["chart_types"] = list(chart_req.get("types") or [])
 
     if any(
         word in lowered
@@ -139,3 +157,7 @@ def _apply_local_revision_rules(spec: TaskSpec, request: str) -> None:
         spec.options["generation_policy"] = "custom_content"
 
     spec.options["content_plan"] = plan
+
+
+def _chart_request_is_negative(request: str) -> bool:
+    return bool(analyze_chart_requirements(request).get("negative"))

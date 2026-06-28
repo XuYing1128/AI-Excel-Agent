@@ -225,7 +225,25 @@ def _mentions_chart_choice(text: str) -> bool:
 
 
 def _mentions_finance_basis(text: str) -> bool:
-    return any(word in text for word in ("人民币", "美元", "币种", "含税", "未税", "税率", "按月", "按年"))
+    return any(
+        word in text
+        for word in (
+            "人民币",
+            "美元",
+            "币种",
+            "含税",
+            "未税",
+            "税率",
+            "按月",
+            "按年",
+            "月薪",
+            "薪资",
+            "工资",
+            "季度",
+            "(元)",
+            "（元）",
+        )
+    )
 
 
 def _mentions_time_basis(text: str) -> bool:

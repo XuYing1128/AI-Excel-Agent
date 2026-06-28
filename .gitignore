@@ -8,8 +8,16 @@ venv/
 env/
 .env
 data/private/
+# 导出的 API 配置含真实密钥，仅供本地留存，绝不进仓库
+AI-Excel-Agent_API配置.txt
+*_API配置.txt
 build/
 dist/
+# 打包安装包产物（绝不能进仓库：85MB 二进制 + 可能含打包环境信息）
+installer/*.exe
+*.Setup-*.exe
+AI-Excel-Agent-Setup*.exe
+release/
 *.egg-info/
 .DS_Store
 Thumbs.db
@@ -33,7 +41,20 @@ outputs/*.json
 outputs/*.md
 !outputs/.gitkeep
 
+# 本地真实任务验证的运行产物（result.xlsx、run_log、agent_tmp 等），不入库。
+outputs/_*/
+outputs/ai_agent_benchmark/
+
 # Temporary Office lock files.
 ~$*.xlsx
 ~$*.xlsm
 ~$*.docx
+
+# 本地验证脚本的运行产物（_regress/_exam 等输出的 .txt），不入库。
+demo_teaching/*.txt
+
+# AI 根因诊断报告的集中收集目录（运行产物，本地保留供收集，不入库）。
+diagnostics/
+
+# 新手引导"已看过"标记（每台机器本地状态）。
+config/.onboarded

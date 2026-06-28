@@ -59,6 +59,7 @@ def validate_workbook(path: str | Path, output_json: str | Path | None = None) -
     summary["workbook_opened"] = True
     summary["sheet_count"] = len(wb.worksheets)
     summary["visible_sheet_count"] = sum(1 for ws in wb.worksheets if ws.sheet_state == "visible")
+    summary["chart_count"] = sum(len(ws._charts) for ws in wb.worksheets)
     summary["sheets"] = [
         {
             "name": ws.title,
@@ -67,6 +68,7 @@ def validate_workbook(path: str | Path, output_json: str | Path | None = None) -
             "max_column": ws.max_column,
             "auto_filter": ws.auto_filter.ref,
             "freeze_panes": str(ws.freeze_panes) if ws.freeze_panes else None,
+            "chart_count": len(ws._charts),
         }
         for ws in wb.worksheets
     ]
@@ -233,7 +235,11 @@ def _check_sheet_level(ws, report: dict[str, Any]) -> None:
 
 
 def _check_headers(ws, header: dict[str, Any] | None, report: dict[str, Any]) -> None:
-    if _is_instruction_sheet(ws.title) or header is None:
+    if (
+        _is_instruction_sheet(ws.title)
+        or ("参数" in ws.title and not ws.auto_filter.ref)
+        or header is None
+    ):
         return
     row = header["row"]
     headers = header["headers"]
@@ -330,7 +336,9 @@ def _check_formula_range_coverage(ws, coordinate: str, formula: str, header: dic
     for col1, row1, col2, row2 in RANGE_REF.findall(formula):
         start = int(row1)
         end = int(row2)
-        if start <= header["row"] + 1 and end < data_last_row:
+        # 只对纵向范围（同列、跨行）检查“是否覆盖到数据末行”；横向范围（同一行跨列，
+        # 例如各产品线 =SUM(B2:E2) 算全年合计）本就不该覆盖到末行，跳过以免误判。
+        if col1 == col2 and start < end and start <= header["row"] + 1 and end < data_last_row:
             _add_warning(
                 report,
                 "formula_range_short",
@@ -468,21 +476,39 @@ def _check_data_quality(ws, cached_ws, header: dict[str, Any] | None, report: di
                 _add_warning(report, "negative_inventory", f"库存列 {header_value} 存在负库存: {negatives[:8]}", sheet=ws.title)
 
 
+def _cells_in_ref(ws, ref: str) -> set[str]:
+    """Return the set of cell coordinates a string range covers.
+
+    ``ws[ref]`` returns a Cell for a single-cell ref ("A1") and tuples-of-rows
+    for a real range ("A1:C3") — we have to handle both shapes or it crashes.
+    """
+
+    region = ws[ref]
+    if hasattr(region, "coordinate"):  # single Cell
+        return {region.coordinate}
+    cells: set[str] = set()
+    for row in region:
+        if hasattr(row, "coordinate"):
+            cells.add(row.coordinate)
+        else:
+            cells.update(cell.coordinate for cell in row)
+    return cells
+
+
 def _check_merged_filter_area(ws, report: dict[str, Any]) -> None:
     if not ws.auto_filter.ref:
         return
     header_row = _find_header_row(ws) or 0
-    filter_range = ws[ws.auto_filter.ref]
-    filter_cells = {cell.coordinate for row in filter_range for cell in row}
+    filter_cells = _cells_in_ref(ws, ws.auto_filter.ref)
     for merged in ws.merged_cells.ranges:
         if merged.min_row <= header_row:
             continue
         top_left = ws.cell(merged.min_row, merged.min_col).value
         if merged.min_row == merged.max_row and any(
-            word in str(top_left or "") for word in ("小计", "总计", "合计")
+            word in str(top_left or "") for word in ("小计", "总计", "合计", "汇总")
         ):
             continue
-        merged_cells = {cell.coordinate for row in ws[str(merged)] for cell in row}
+        merged_cells = _cells_in_ref(ws, str(merged))
         if filter_cells & merged_cells:
             _add_warning(report, "merged_filter_area", f"合并单元格 {merged} 与筛选区域重叠。", sheet=ws.title)
 
@@ -570,12 +596,31 @@ def _finalize_report(report: dict[str, Any], output_json: str | Path | None) -> 
 
 
 def _is_instruction_sheet(name: str) -> bool:
-    return _normalized_name(name) in INSTRUCTION_NAMES
+    normalized = _normalized_name(name)
+    return (
+        normalized in INSTRUCTION_NAMES
+        or "说明" in normalized
+        or "readme" in normalized
+        or "instruction" in normalized
+    )
 
 
 def _is_data_sheet(name: str) -> bool:
     normalized = _normalized_name(name)
-    return normalized in DATA_SHEET_NAMES or "data" in normalized or "输入" in normalized or "数据" in normalized
+    return normalized in DATA_SHEET_NAMES or any(
+        keyword in normalized
+        for keyword in (
+            "data",
+            "输入",
+            "数据",
+            "明细",
+            "记录",
+            "录入",
+            "名册",
+            "清单",
+            "原始",
+        )
+    )
 
 
 def _normalized_name(value: str) -> str:
@@ -685,13 +730,14 @@ def _cell_effective_value(cell, cached_ws) -> Any:
 
 
 def _has_division_risk(formula: str) -> bool:
-    upper = formula.upper()
-    if "/" not in formula:
+    formula_without_strings = re.sub(r'"(?:[^"]|"")*"', "", formula)
+    upper = formula_without_strings.upper()
+    if "/" not in formula_without_strings:
         return False
     if "IFERROR" in upper or "IF(" in upper:
         return False
     # Ignore simple divisions by numeric constants, e.g. /12.
-    risky_parts = re.findall(r"/\s*([^,+\-*/\)]+)", formula)
+    risky_parts = re.findall(r"/\s*([^,+\-*/\)]+)", formula_without_strings)
     for part in risky_parts:
         try:
             return float(part.strip()) == 0

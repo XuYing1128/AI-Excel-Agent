@@ -43,6 +43,19 @@ def test_revision_can_remove_summary_and_rename_custom_table():
     assert revised.include_summary is False
 
 
+def test_revision_request_for_chart_sets_chart_requirement():
+    current = build_task_spec_draft("生成销售汇总表。", []).task_spec
+    current.include_charts = False
+    revised = build_revision_task_spec(
+        current,
+        "重新审查生成图表，增加柱状对比图。",
+        ApiSettings(),
+    )
+    assert revised.include_charts is True
+    assert revised.options["chart_requirements"]["required"] is True
+    assert "column" in revised.options["chart_types"]
+
+
 def test_revision_generates_a_new_valid_workbook_without_overwriting(tmp_path):
     prompt = """主题：天气安排
 表格需包含以下列：日期、城市、最高气温、最低气温、日均气温

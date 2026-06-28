@@ -6,8 +6,14 @@ from copy import deepcopy
 from pathlib import Path
 from typing import Any
 
+from .chart_spec import analyze_chart_requirements
 from .content_plan import build_local_content_plan, suggest_output_name
-from .intent_classifier import KEYWORDS, SUPPORTED_TYPES, classify_intent, normalize_table_type
+from .intent_classifier import (
+    SUPPORTED_TYPES,
+    classify_intent,
+    normalize_table_type,
+    ranked_intents,
+)
 from .requirement_analysis import analyze_requirement_gaps, questions_from_gaps
 from .task_spec import TaskSpec, TaskSpecDraft
 
@@ -52,13 +58,18 @@ def build_task_spec_draft(user_prompt: str, input_files: list[str]) -> TaskSpecD
         files,
         content_plan,
     )
-    chart_requested = any(
-        word in prompt.lower() for word in ["图表", "趋势图", "柱状图", "折线图", "dashboard", "看板"]
-    )
+    chart_requirements = analyze_chart_requirements(prompt)
+    chart_requested = bool(chart_requirements["required"])
     summary_requested = any(
         word in prompt.lower() for word in ["汇总页", "统计页", "summary sheet", "dashboard", "看板"]
     )
     custom_layout = bool(content_plan.get("explicit_structure"))
+    default_chart_allowed = (
+        classification.table_type in CHART_TYPES
+        and not custom_layout
+        and "纯表格" not in prompt
+        and not chart_requirements.get("negative")
+    )
     task_spec = TaskSpec(
         task_type=classification.table_type,
         user_goal=prompt or "根据上传文件生成合适的本地电子表格",
@@ -73,9 +84,7 @@ def build_task_spec_draft(user_prompt: str, input_files: list[str]) -> TaskSpecD
             and any(Path(path).suffix.lower() in {".xlsx", ".xlsm"} for path in files)
             and any(word in prompt for word in ["保留", "参考模板", "原样", "样式"])
         ),
-        include_charts=chart_requested or (
-            classification.table_type in CHART_TYPES and not custom_layout
-        ),
+        include_charts=chart_requested or default_chart_allowed,
         include_summary=summary_requested or not custom_layout,
         include_instructions_sheet=not (
             custom_layout and content_plan.get("layout") == "single_sheet"
@@ -96,6 +105,8 @@ def build_task_spec_draft(user_prompt: str, input_files: list[str]) -> TaskSpecD
             ),
             "content_plan": content_plan,
             "chart_requested_explicitly": chart_requested,
+            "chart_requirements": chart_requirements,
+            "chart_types": list(chart_requirements.get("types") or []),
             "summary_sheet_requested_explicitly": summary_requested,
             "model_may_edit_cells": False,
             "deterministic_validation_required": True,
@@ -159,6 +170,9 @@ def merge_user_answers_into_task_spec(task_spec: TaskSpec, answers: dict[str, An
         if not merged.output_name.lower().endswith(".xlsx"):
             merged.output_name += ".xlsx"
 
+    previous_chart_requirements = dict(
+        merged.options.get("chart_requirements") or {}
+    )
     for key in (
         "preserve_template_style",
         "include_charts",
@@ -167,9 +181,44 @@ def merge_user_answers_into_task_spec(task_spec: TaskSpec, answers: dict[str, An
     ):
         if key in clean_answers:
             setattr(merged, key, bool(clean_answers[key]))
+    if "include_charts" in clean_answers:
+        if bool(clean_answers["include_charts"]):
+            chart_types = clean_answers.get("chart_types") or previous_chart_requirements.get("types") or []
+            chart_requirements = analyze_chart_requirements(
+                merged.user_goal,
+                force_include=True,
+                requested_types=chart_types,
+            )
+            merged.options["chart_requested_explicitly"] = True
+            merged.options["chart_requirements"] = chart_requirements
+            merged.options["chart_types"] = list(chart_requirements.get("types") or [])
+        else:
+            merged.options["chart_requested_explicitly"] = False
+            merged.options["chart_requirements"] = {
+                "required": False,
+                "types": [],
+                "explicit": False,
+                "negative": True,
+                "reason": "用户确认不生成图表",
+            }
+            merged.options["chart_types"] = []
+
+    if "chart_types" in clean_answers and merged.include_charts:
+        chart_requirements = analyze_chart_requirements(
+            merged.user_goal,
+            force_include=True,
+            requested_types=clean_answers.get("chart_types"),
+        )
+        merged.options["chart_requested_explicitly"] = True
+        merged.options["chart_requirements"] = chart_requirements
+        merged.options["chart_types"] = list(chart_requirements.get("types") or [])
 
     data_mode = str(clean_answers.get("data_mode", "")).strip()
-    if data_mode == "template" and not merged.input_files:
+    current_content = merged.options.get("content_plan", {})
+    has_inline_data = bool(
+        current_content.get("records") or current_content.get("inline_tables")
+    )
+    if data_mode == "template" and not merged.input_files and not has_inline_data:
         _append_unique(merged.assumptions, "未提供原始数据，当前版本将生成标准模板示例。")
     elif data_mode == "upload" and not merged.input_files:
         _append_unique(merged.assumptions, "用户计划使用原始数据，但确认时尚未提供可用文件。")
@@ -190,6 +239,17 @@ def merge_user_answers_into_task_spec(task_spec: TaskSpec, answers: dict[str, An
         merged.options["content_plan"] = refreshed_plan
     elif current_plan:
         merged.options["content_plan"] = current_plan
+
+    refreshed_chart_requirements = analyze_chart_requirements(
+        merged.user_goal,
+        force_include=bool(merged.include_charts and merged.options.get("chart_requested_explicitly")),
+        requested_types=merged.options.get("chart_types"),
+    )
+    if refreshed_chart_requirements["required"]:
+        merged.include_charts = True
+        merged.options["chart_requested_explicitly"] = True
+        merged.options["chart_requirements"] = refreshed_chart_requirements
+        merged.options["chart_types"] = list(refreshed_chart_requirements.get("types") or [])
 
     merged.user_answers.update(clean_answers)
     merged.options["clarification_rounds"] = 1
@@ -231,14 +291,7 @@ def _build_questions(
 
 
 def _classification_alternatives(prompt: str) -> list[str]:
-    lowered = prompt.lower()
-    scored: list[tuple[int, int, str]] = []
-    for table_type, words in KEYWORDS.items():
-        matched = [word for word in words if word.lower() in lowered]
-        if matched:
-            scored.append((len(matched), len("".join(matched)), table_type))
-    scored.sort(reverse=True)
-    return [table_type for _, _, table_type in scored]
+    return ranked_intents(prompt)
 
 
 def _needs_input_file(prompt: str) -> bool:

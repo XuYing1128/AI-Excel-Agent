@@ -1,6 +1,7 @@
 import json
 
 from excel_agent.api_settings import ApiSettings
+from excel_agent.model_registry import ModelSettings, ProviderConfig, save_model_settings
 from excel_agent.services import subjective_review_service as review_service
 from excel_agent.services.custom_api_service import ApiCallResult
 from excel_agent.task_paths import create_task_paths
@@ -94,3 +95,59 @@ def test_review_cannot_recommend_removing_user_confirmed_chart(tmp_path, monkeyp
     assert result["reviews"][0]["status"] == "pass"
     assert result["reviews"][0]["concerns"] == []
     assert result["reviews"][0]["suggestions"] == []
+
+
+def test_subjective_review_prefers_reviewer_role_over_legacy_api_settings(
+    tmp_path,
+    monkeypatch,
+):
+    model_path = tmp_path / "private" / "model_settings.json"
+    monkeypatch.setenv("AI_EXCEL_MODEL_SETTINGS_FILE", str(model_path))
+    save_model_settings(
+        ModelSettings(
+            providers=[
+                ProviderConfig(
+                    id="reviewer",
+                    name="审查模型",
+                    base_url="https://reviewer.example/v1",
+                    api_key="secret",
+                    model="reviewer-model",
+                )
+            ],
+            roles={"reviewer": "reviewer"},
+        ),
+        model_path,
+    )
+    used = {}
+
+    def fake_chat(settings, **kwargs):
+        used["provider"] = settings.provider_name
+        return ApiCallResult(
+            success=True,
+            content='{"status":"pass","issues":[],"suggestions":[]}',
+            error=None,
+            status_code=200,
+            latency_ms=12,
+        )
+
+    monkeypatch.setattr(review_service, "chat_completion", fake_chat)
+    paths = create_task_paths("sales_report", tmp_path / "tasks")
+    legacy = ApiSettings(
+        enabled=True,
+        base_url="https://legacy.example/v1",
+        api_key="legacy",
+        model="legacy-model",
+        provider_name="旧单模型",
+    )
+
+    result = review_service.run_subjective_review(
+        TaskSpec(task_type="sales_report", user_goal="做销售表"),
+        {"status": "pass"},
+        {"sheet_count": 1, "sheets": [{"name": "明细"}]},
+        {"mode": "domain_compiler", "message": "完成"},
+        paths,
+        legacy,
+    )
+
+    assert result["enabled"] is True
+    assert used["provider"] == "审查模型"

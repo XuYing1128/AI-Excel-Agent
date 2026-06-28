@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import html
 import json
+import time
 from copy import deepcopy
 from pathlib import Path
 from typing import Any
@@ -17,11 +18,37 @@ from excel_agent.api_settings import (
     mask_api_key,
     save_api_settings,
 )
+from excel_agent.chart_spec import CHART_TYPE_LABELS, chart_type_from_text
 from excel_agent.intent_classifier import SUPPORTED_TYPES, classify_intent
 from excel_agent.manifest import (
     append_manifest_record,
     build_manifest_record,
     recent_tasks,
+)
+from excel_agent.memory_store import (
+    clear_preferences,
+    learn_preferences_from_task,
+    list_preferences,
+    list_task_history,
+    record_task_history,
+)
+from excel_agent.model_registry import (
+    ROLE_LABELS,
+    ROLE_NAMES,
+    ModelSettings,
+    ProviderConfig,
+    delete_model_settings,
+    from_legacy_api_settings,
+    get_provider,
+    load_model_settings,
+    save_model_settings,
+    safe_provider_id,
+    test_provider,
+)
+from excel_agent.model_presets import (
+    PRESET_BY_KEY,
+    PROVIDER_PRESETS,
+    detect_provider_key,
 )
 from excel_agent.preview import (
     combined_revision_prompt,
@@ -32,6 +59,7 @@ from excel_agent.preview import (
 from excel_agent.services.api_task_planner import enhance_task_spec_draft
 from excel_agent.services.custom_api_service import test_api_connection
 from excel_agent.services.revision_service import build_revision_task_spec
+from excel_agent.services.diagnostic_report import run_diagnostic_async
 from excel_agent.services.runtime_compat import load_generation_service
 from excel_agent.services.subjective_review_service import run_subjective_review
 from excel_agent.services.validation_service import validate_generated_workbook
@@ -78,12 +106,16 @@ STATE_DEFAULTS: dict[str, Any] = {
     "validation_result": None,
     "subjective_review_result": None,
     "api_settings": None,
+    "model_settings": None,
     "api_message": "",
     "api_message_kind": "info",
     "api_edit_mode": False,
+    "provider_editor_open": False,
+    "provider_test_results": {},
     "versions": [],
     "revision_request": "",
     "revision_output_name": "",
+    "onboarded": False,
 }
 
 
@@ -93,6 +125,8 @@ def initialize_state() -> None:
             st.session_state[key] = deepcopy(default)
     if st.session_state.api_settings is None:
         st.session_state.api_settings = load_api_settings()
+    if st.session_state.model_settings is None:
+        st.session_state.model_settings = load_model_settings()
 
 
 def inject_styles() -> None:
@@ -102,103 +136,114 @@ def inject_styles() -> None:
         :root {
             --brand: #2563eb;
             --brand-dark: #1d4ed8;
-            --ink: #172033;
-            --muted: #64748b;
-            --line: #e3e8f1;
-            --canvas: #f5f7fb;
+            --brand-soft: #eff4ff;
+            --accent: #3b82f6;
+            --ink: #1f2937;
+            --muted: #6b7280;
+            --line: #e5e7eb;
+            --canvas: #f7f9fc;
+            --ok: #16a34a;
+            --warn: #d97706;
+            --bad: #dc2626;
         }
         html, body, [class*="css"] {
-            font-family: "Microsoft YaHei", "PingFang SC", "Noto Sans CJK SC", sans-serif;
+            font-family: "Microsoft YaHei", "PingFang SC", "Noto Sans CJK SC", -apple-system, sans-serif;
         }
-        .stApp { background: var(--canvas); color: var(--ink); }
-        .block-container {
-            max-width: 1180px;
-            padding-top: 1.4rem;
-            padding-bottom: 4rem;
+        .stApp {
+            background: var(--canvas);
+            color: var(--ink);
         }
+        .block-container { max-width: 1320px; padding-top: 1.1rem; padding-bottom: 4rem; padding-left: 2.4rem; padding-right: 2.4rem; }
         header[data-testid="stHeader"],
-        [data-testid="stToolbar"],
-        [data-testid="stDecoration"],
+        [data-testid="stToolbar"], [data-testid="stDecoration"],
         [data-testid="stStatusWidget"],
-        #MainMenu, footer, [data-testid="stSidebar"] {
-            display: none !important;
-        }
+        #MainMenu, footer, [data-testid="stSidebar"] { display: none !important; }
+
+        /* Hero header */
         .page-head {
-            margin: 12px 0 24px;
-            padding: 26px 30px;
-            background: #fff;
+            margin: 4px 0 20px;
+            padding: 22px 26px;
+            background: #ffffff;
             border: 1px solid var(--line);
-            border-radius: 18px;
+            border-radius: 12px;
+            box-shadow: 0 1px 2px rgba(16,24,40,.05);
         }
-        .page-title {
-            font-size: 30px;
-            line-height: 1.3;
-            font-weight: 800;
-            color: #10203a;
-            margin-bottom: 7px;
+        .page-title { font-size: 23px; line-height: 1.3; font-weight: 700; color: var(--ink); margin-bottom: 6px; }
+        .page-subtitle { color: var(--muted); font-size: 14px; line-height: 1.6; max-width: 760px; }
+
+        /* Step indicator */
+        .steps { display: flex; gap: 10px; flex-wrap: wrap; margin: 2px 0 18px; }
+        .step {
+            display: flex; align-items: center; gap: 8px;
+            padding: 7px 14px; border-radius: 999px; font-size: 13px; font-weight: 600;
+            background: #fff; color: var(--muted); border: 1px solid var(--line);
         }
-        .page-subtitle {
-            color: var(--muted);
-            font-size: 15px;
-            line-height: 1.75;
+        .step .dot {
+            width: 20px; height: 20px; border-radius: 50%; display: grid; place-items: center;
+            font-size: 12px; background: #eef1f6; color: var(--muted); font-weight: 700;
         }
+        .step.active { background: var(--brand); color: #fff; border-color: var(--brand);
+            box-shadow: 0 8px 18px -8px rgba(79,70,229,.6); }
+        .step.active .dot { background: rgba(255,255,255,.25); color: #fff; }
+        .step.done { color: var(--ok); border-color: #c7ecd3; background: #f2fcf5; }
+        .step.done .dot { background: var(--ok); color: #fff; }
+
+        /* Cards */
         div[data-testid="stVerticalBlockBorderWrapper"] {
-            background: #fff;
-            border: 1px solid var(--line);
-            border-radius: 16px;
-            box-shadow: 0 5px 18px rgba(30, 50, 90, .04);
+            background: #fff; border: 1px solid var(--line);
+            border-radius: 12px; box-shadow: 0 1px 2px rgba(16,24,40,.05);
         }
-        h1, h2, h3 { color: var(--ink); letter-spacing: -.02em; }
-        h3 { font-size: 20px !important; }
+        h1, h2, h3 { color: var(--ink); letter-spacing: -.01em; }
+        h3 { font-size: 19px !important; font-weight: 750 !important; }
+
+        /* Buttons */
         .stButton > button, .stDownloadButton > button {
-            border-radius: 9px;
-            min-height: 42px;
-            font-weight: 700;
+            border-radius: 11px; min-height: 44px; font-weight: 700; transition: all .15s ease;
         }
-        .stButton > button[kind="primary"] {
+        .stButton > button[kind="primary"], .stDownloadButton > button {
             background: var(--brand);
-            border-color: var(--brand);
+            border: 1px solid var(--brand); color: #fff; box-shadow: none;
         }
-        .stButton > button[kind="primary"]:hover {
-            background: var(--brand-dark);
-            border-color: var(--brand-dark);
+        .stButton > button[kind="primary"]:hover, .stDownloadButton > button:hover {
+            background: var(--brand-dark); border-color: var(--brand-dark);
         }
+        .stButton > button[kind="secondary"] {
+            background: #fff; border: 1px solid var(--line); color: var(--ink);
+        }
+        .stButton > button[kind="secondary"]:hover { border-color: var(--accent); color: var(--brand); }
+
+        /* Inputs */
         div[data-testid="stTextArea"] textarea,
-        div[data-testid="stTextInput"] input { border-radius: 9px; }
+        div[data-testid="stTextInput"] input {
+            border-radius: 11px !important; border: 1px solid var(--line) !important;
+        }
+        div[data-testid="stTextArea"] textarea:focus,
+        div[data-testid="stTextInput"] input:focus {
+            border-color: var(--accent) !important; box-shadow: 0 0 0 3px var(--brand-soft) !important;
+        }
         [data-testid="stFileUploaderDropzone"] {
-            background: #f8faff;
-            border: 1px dashed #b8c8e5;
-            border-radius: 11px;
+            background: #f8faff; border: 1.5px dashed #c3cdf0; border-radius: 14px;
         }
         [data-testid="stFileUploaderDropzoneInstructions"] { display: none; }
         [data-testid="stFileUploaderDropzone"] button > * { display: none !important; }
-        [data-testid="stFileUploaderDropzone"] button::after {
-            content: "选择本地文件";
-            font-size: 14px;
-        }
+        [data-testid="stFileUploaderDropzone"] button::after { content: "选择本地文件"; font-size: 14px; }
         [data-testid="stFileUploaderDropzone"] button { font-size: 0; }
-        div[data-testid="stAlert"] { border-radius: 11px; }
+        div[data-testid="stAlert"] { border-radius: 13px; }
+
+        /* Tabs as pills */
+        button[data-baseweb="tab"] { font-weight: 650; }
+        [data-baseweb="tab-list"] { gap: 4px; }
+
+        /* Plan cards */
         .plan-card {
-            border: 1px solid var(--line);
-            border-radius: 12px;
-            padding: 14px 16px;
-            background: #fbfcff;
-            min-height: 102px;
+            border: 1px solid var(--line); border-radius: 10px; padding: 14px 16px;
+            background: #fff; min-height: 96px;
         }
-        .plan-label { color: #718096; font-size: 12px; margin-bottom: 7px; }
-        .plan-value {
-            color: var(--ink);
-            font-size: 15px;
-            line-height: 1.55;
-            font-weight: 650;
-        }
+        .plan-label { color: var(--muted); font-size: 12px; margin-bottom: 6px; }
+        .plan-value { color: var(--ink); font-size: 15px; line-height: 1.5; font-weight: 600; }
         .soft-note {
-            padding: 12px 14px;
-            background: #f8fafc;
-            border-left: 3px solid #94a3b8;
-            border-radius: 8px;
-            color: #475569;
-            line-height: 1.7;
+            padding: 12px 14px; background: var(--brand-soft); border-left: 3px solid var(--brand);
+            border-radius: 8px; color: #1e40af; line-height: 1.7; font-size: 13.5px;
         }
         </style>
         """,
@@ -214,6 +259,7 @@ def render_navigation() -> None:
         width="stretch",
     ):
         st.session_state.active_page = "workbench"
+        st.toast("已切换到「制作表格」", icon="📝")
         st.rerun()
     if settings.button(
         "接口设置",
@@ -221,6 +267,7 @@ def render_navigation() -> None:
         width="stretch",
     ):
         st.session_state.active_page = "settings"
+        st.toast("已切换到「接口设置」", icon="⚙️")
         st.rerun()
     if history.button(
         "最近文件",
@@ -228,6 +275,7 @@ def render_navigation() -> None:
         width="stretch",
     ):
         st.session_state.active_page = "history"
+        st.toast("已切换到「最近文件」", icon="📁")
         st.rerun()
 
 
@@ -241,6 +289,55 @@ def render_header(title: str, subtitle: str) -> None:
         """,
         unsafe_allow_html=True,
     )
+
+
+def render_steps(active: int) -> None:
+    """用成熟开源组件(streamlit-antd-components)画 1→4 步骤条，非技术用户始终知道在哪一步。"""
+
+    import streamlit_antd_components as sac
+
+    names = ["描述需求", "完善要求", "确认生成", "查看结果"]
+    sac.steps(
+        items=[sac.StepsItem(title=name) for name in names],
+        index=max(0, min(active - 1, len(names) - 1)),
+        color="blue",
+        size="sm",
+        key="workflow_steps",
+    )
+
+
+def _onboard_marker() -> Path:
+    # 基于 project_root() 而非相对路径，保证打包成 exe 后标记写在固定可写位置。
+    from excel_agent.io_utils import project_root
+    return project_root() / "config" / ".onboarded"
+
+
+def show_onboarding_if_first_use() -> None:
+    """首次使用时弹一次新手引导；看完写标记，之后不再弹。"""
+    if st.session_state.get("onboarded") or _onboard_marker().exists():
+        return
+
+    @st.dialog("👋 欢迎使用本地表格助手")
+    def _guide() -> None:
+        st.markdown(
+            "用大白话把你要的表说清楚，AI 帮你做成 Excel。**三步上手：**\n\n"
+            "1. **接口设置**（只需一次）：填好模型接口和密钥（如豆包 / DeepSeek）。\n"
+            "2. **制作表格**：用中文描述你要的表，可上传数据或模板。\n"
+            "3. **生成 → 下载**：点生成，AI 做表并自动校验公式，完成后直接下载。\n\n"
+            "贴心：每次生成后台会自动做一次「问题诊断」，报告集中在项目的 `diagnostics/` "
+            "文件夹，方便回看和分享。"
+        )
+        if st.button("开始使用 →", type="primary", width="stretch"):
+            try:
+                marker = _onboard_marker()
+                marker.parent.mkdir(parents=True, exist_ok=True)
+                marker.write_text("ok", encoding="utf-8")
+            except OSError:
+                pass
+            st.session_state.onboarded = True
+            st.rerun()
+
+    _guide()
 
 
 def reset_generated_result() -> None:
@@ -376,8 +473,12 @@ def execute_generation(
     spec: TaskSpec,
     progress_callback: Any | None = None,
 ) -> None:
+    started_at = time.perf_counter()
+
     def progress(stage: str, message: str) -> None:
         if progress_callback:
+            # 计时统一交给 st.spinner(show_time=True) 的实时秒表；这里不再拼"已运行X秒"——
+            # 否则会和实时秒表打架，而且阻塞期间这个数字是卡住的，反而显得坏掉。
             progress_callback(stage, message)
 
     progress("prepare", "任务已接收，正在准备输入文件和生成目录……")
@@ -435,6 +536,13 @@ def execute_generation(
             task_paths=task_paths,
             api_settings=st.session_state.api_settings,
         )
+        # 每次生成后在后台独立跑根因诊断，落盘 diagnostic_report.md/.json，不阻塞出表与交付。
+        run_diagnostic_async(
+            spec,
+            task_paths,
+            generation_summary=generation.to_dict(),
+            api_settings=st.session_state.api_settings,
+        )
         status = validation.status if generation.success else "error"
         append_manifest_record(
             build_manifest_record(
@@ -450,9 +558,25 @@ def execute_generation(
                 error=generation.error,
             )
         )
+        record_task_history(
+            task_id=task_paths.task_id,
+            prompt=spec.user_goal,
+            task_type=spec.task_type,
+            output_file=str(task_paths.output_file)
+            if task_paths.output_file.exists()
+            else None,
+            status=status,
+        )
+        learned_preferences = learn_preferences_from_task(spec, workbook_summary)
         st.session_state.task_spec = spec
         st.session_state.task_paths = task_paths
-        st.session_state.generation_result = generation.to_dict()
+        generation_data = generation.to_dict()
+        generation_data["elapsed_seconds"] = round(
+            time.perf_counter() - started_at,
+            1,
+        )
+        generation_data["learned_preferences"] = learned_preferences
+        st.session_state.generation_result = generation_data
         st.session_state.validation_result = validation.to_dict()
         st.session_state.subjective_review_result = subjective
         st.session_state.versions.append(
@@ -478,6 +602,7 @@ def execute_generation(
             "message": "生成失败。",
             "error": f"{type(exc).__name__}: {exc}",
             "notices": [],
+            "elapsed_seconds": round(time.perf_counter() - started_at, 1),
         }
         st.session_state.validation_result = {
             "status": "error",
@@ -494,109 +619,330 @@ def execute_generation(
         progress("error", f"任务失败：{type(exc).__name__}: {exc}")
 
 
+def _format_elapsed(seconds: int | float) -> str:
+    total = max(0, int(seconds))
+    minutes, remain = divmod(total, 60)
+    if minutes:
+        return f"{minutes}分{remain:02d}秒"
+    return f"{remain}秒"
+
+
+def run_generation_with_status(spec: TaskSpec, *, revision: bool = False) -> None:
+    """Show deterministic stage progress and a live elapsed-time indicator."""
+
+    label = "修改任务已接收，准备开始……" if revision else "任务已接收，准备开始……"
+    status_box = st.status(label, expanded=True)
+    progress_bar = st.progress(0, text="准备任务")
+    stage_values = {
+        "prepare": 5,
+        "input": 12,
+        "model": 28,
+        "build": 58,
+        "validate": 76,
+        "review": 90,
+        "complete": 100,
+        "error": 100,
+    }
+
+    def show_progress(stage: str, message: str) -> None:
+        value = stage_values.get(stage, 20)
+        progress_bar.progress(value, text=message)
+        status_box.write(message)
+        if stage == "complete":
+            status_box.update(
+                label="修改版已生成并检查完成" if revision else "表格已生成并检查完成",
+                state="complete",
+            )
+        elif stage == "error":
+            status_box.update(
+                label="修改失败" if revision else "生成失败",
+                state="error",
+            )
+
+    with st.spinner(
+        "正在运行，请勿关闭页面。计时器会持续显示已用时间。",
+        show_time=True,
+        width="stretch",
+    ):
+        execute_generation(spec, show_progress)
+
+
+def _persist_model_settings(updated: ModelSettings) -> None:
+    """Save multi-model settings and keep the legacy single-model mirror in sync."""
+    save_model_settings(updated)
+    st.session_state.model_settings = updated
+    builder = get_provider("builder", updated)
+    st.session_state.api_settings = builder.to_api_settings() if builder else ApiSettings()
+    if builder:
+        save_api_settings(st.session_state.api_settings)
+
+
+def _delete_provider_inline(provider_id: str) -> None:
+    current: ModelSettings = st.session_state.model_settings
+    providers = [item for item in current.providers if item.id != provider_id]
+    roles = {role: pid for role, pid in current.roles.items() if pid != provider_id}
+    st.session_state.provider_test_results.pop(provider_id, None)
+    if providers:
+        for role in ROLE_NAMES:
+            roles.setdefault(role, providers[0].id)
+    _persist_model_settings(
+        ModelSettings(
+            providers=providers,
+            roles=roles,
+            agent_enabled=current.agent_enabled,
+            run_python_enabled=current.run_python_enabled,
+        )
+    )
+
+
+def _provider_status_badge(provider: ProviderConfig) -> str:
+    """Return a UI status that does not confuse config completeness with reachability."""
+
+    if not provider.enabled:
+        return "⚪ 已停用"
+    if not provider.base_url or not provider.api_key or not provider.model:
+        return "🔴 未填完整"
+    result = st.session_state.provider_test_results.get(provider.id)
+    if not result:
+        return "🟡 未测试"
+    return "🟢 连接正常" if result.get("success") else "🔴 连接失败"
+
+
+def _remember_provider_test(provider: ProviderConfig, result) -> None:
+    st.session_state.provider_test_results[provider.id] = {
+        "success": bool(result.success),
+        "message": result.content if result.success else result.error,
+        "status_code": result.status_code,
+        "latency_ms": result.latency_ms,
+        "finish_reason": result.finish_reason,
+    }
+
+
 def render_settings_page() -> None:
-    render_header("接口设置", "接口配置单独保存在这里，只有点击保存后才会生效。")
-    settings: ApiSettings = st.session_state.api_settings
+    render_header("接口设置", "在这里配置你自己的大模型接口（密钥只存在本机，不会上传）。")
+    model_settings: ModelSettings = st.session_state.model_settings
+    role_provider = get_provider("builder", model_settings)
     with st.container(border=True):
-        st.subheader("当前状态")
-        if settings.configured:
-            st.success(
-                f"已启用：{settings.provider_name} / {settings.model} / {mask_api_key(settings.api_key)}"
+        if role_provider:
+            st.info(
+                "当前主用模型："
+                f"{role_provider.name} · {role_provider.model} · {mask_api_key(role_provider.api_key)}"
+                f" · {_provider_status_badge(role_provider)}"
             )
         else:
-            st.info("当前使用本地规则。需要时可以配置兼容对话补全格式的接口。")
-        if st.button("编辑接口设置", width="content"):
-            st.session_state.api_edit_mode = not st.session_state.api_edit_mode
-            st.rerun()
+            st.info("还没有配置完整且启用的模型。未配置时会使用本地规则生成。")
 
-    if st.session_state.api_edit_mode:
-        with st.container(border=True):
-            st.subheader("编辑设置")
-            with st.form("api_settings_form"):
-                col_a, col_b = st.columns(2)
-                with col_a:
-                    provider = st.text_input("接口名称", value=settings.provider_name)
-                    base_url = st.text_input(
-                        "接口地址",
-                        value=settings.base_url,
-                        placeholder="例如：https://你的接口地址/v1",
+    with st.container(border=True):
+        st.subheader("已配置的模型")
+        if not model_settings.providers:
+            st.info("还没有添加模型。在下面选好厂商、填入你的密钥即可。")
+        else:
+            for item in model_settings.providers:
+                vendor = PRESET_BY_KEY[detect_provider_key(item.base_url)].name
+                roles_here = [
+                    ROLE_LABELS[role]
+                    for role in ROLE_NAMES
+                    if model_settings.roles.get(role) == item.id
+                ]
+                info_col, test_col, del_col = st.columns([6, 1.3, 1.3])
+                info_col.markdown(
+                    f"**{item.name}**　`{item.model}`　"
+                    + _provider_status_badge(item)
+                )
+                info_col.caption(
+                    f"{vendor} · {item.base_url}"
+                    + (f" · 角色：{'、'.join(roles_here)}" if roles_here else " · 暂未指派角色")
+                )
+                if test_col.button("测试连接", key=f"test_{item.id}", width="stretch"):
+                    if not item.configured:
+                        st.warning(f"「{item.name}」还没填完整地址、密钥或模型名称。")
+                    else:
+                        with st.spinner(f"正在测试 {item.name} ……"):
+                            result = test_provider(item)
+                        _remember_provider_test(item, result)
+                        if result.success:
+                            st.success(f"{item.name}：{result.content or '连接成功'}")
+                        else:
+                            st.error(f"{item.name} 连接失败：{result.error}")
+                if del_col.button("删除", key=f"del_{item.id}", width="stretch"):
+                    st.session_state.pending_delete_id = item.id
+                    st.rerun()
+                if st.session_state.get("pending_delete_id") == item.id:
+                    st.warning(f"确定删除「{item.name}」吗？删除后它的角色会自动改到其它模型。")
+                    yes_col, no_col, _ = st.columns([1, 1, 4])
+                    if yes_col.button("确定删除", key=f"delyes_{item.id}", type="primary", width="stretch"):
+                        _delete_provider_inline(item.id)
+                        st.session_state.pending_delete_id = None
+                        st.rerun()
+                    if no_col.button("取消", key=f"delno_{item.id}", width="stretch"):
+                        st.session_state.pending_delete_id = None
+                        st.rerun()
+                st.divider()
+
+        with st.expander("添加或更新模型", expanded=not model_settings.providers):
+            provider_options = ["新建模型", *[item.id for item in model_settings.providers]]
+            selected_provider_id = st.selectbox(
+                "选择要编辑的模型",
+                provider_options,
+                key="provider_edit_target",
+            )
+            selected_provider = next(
+                (item for item in model_settings.providers if item.id == selected_provider_id),
+                ProviderConfig(),
+            )
+            is_new_provider = selected_provider_id == "新建模型"
+            # 厂商预设（放在表单外，选中后立即把正确的接口地址预填进表单）。
+            preset_keys = [item.key for item in PROVIDER_PRESETS]
+            default_preset = (
+                "custom" if is_new_provider else detect_provider_key(selected_provider.base_url)
+            )
+            preset_key = st.selectbox(
+                "厂商预设（自动填好正确的接口地址，避免填错）",
+                preset_keys,
+                index=preset_keys.index(default_preset),
+                format_func=lambda key: PRESET_BY_KEY[key].name,
+                # Key includes the edited model so switching models refreshes the
+                # preset to that model's detected vendor (instead of getting stuck).
+                key=f"provider_preset_{selected_provider_id}",
+            )
+            preset = PRESET_BY_KEY[preset_key]
+            if preset.note or preset.model_examples:
+                hint = "ℹ️ " + preset.note
+                if preset.model_examples:
+                    hint += "　模型名示例：" + "、".join(preset.model_examples)
+                st.caption(hint)
+            base_default = preset.base_url if is_new_provider else selected_provider.base_url
+            name_default = preset.name if is_new_provider else selected_provider.name
+            model_placeholder = (
+                preset.model_examples[0] if preset.model_examples else "例如 deepseek-chat"
+            )
+            with st.form("provider_settings_form"):
+                left, right = st.columns(2)
+                with left:
+                    provider_id = st.text_input(
+                        "模型 ID",
+                        value="" if is_new_provider else selected_provider.id,
+                        placeholder="例如 deepseek-chat",
                     )
-                    model = st.text_input("模型名称", value=settings.model)
-                with col_b:
-                    api_key = st.text_input(
-                        "接口密钥",
-                        value=settings.api_key,
+                    provider_name = st.text_input(
+                        "显示名称",
+                        value=name_default,
+                    )
+                    provider_base = st.text_input(
+                        "接口地址（模型）",
+                        value=base_default,
+                        placeholder="例如：https://api.deepseek.com/v1",
+                    )
+                with right:
+                    provider_model = st.text_input(
+                        "模型名称（模型）",
+                        value="" if is_new_provider else selected_provider.model,
+                        placeholder=model_placeholder,
+                    )
+                    provider_key = st.text_input(
+                        "接口密钥（模型）",
+                        value="" if selected_provider_id == "新建模型" else selected_provider.api_key,
                         type="password",
                     )
-                    timeout = st.number_input(
-                        "等待时间（秒）",
+                    provider_timeout = st.number_input(
+                        "等待时间（模型，秒）",
                         min_value=5,
-                        max_value=180,
-                        value=settings.timeout_seconds,
+                        max_value=600,
+                        value=(
+                            120
+                            if selected_provider_id == "新建模型"
+                            else selected_provider.timeout_seconds
+                        ),
                         step=5,
                     )
-                    enabled = st.checkbox("启用这个接口", value=settings.enabled)
-                use_intent = st.checkbox(
-                    "用于理解需求",
-                    value=settings.use_for_intent,
+                    provider_enabled = st.checkbox(
+                        "启用这个模型",
+                        value=True if selected_provider_id == "新建模型" else selected_provider.enabled,
+                    )
+                save_provider = st.form_submit_button("保存这个模型", type="primary")
+            if save_provider:
+                normalized_id = safe_provider_id(provider_id or provider_name or provider_model)
+                updated_provider = ProviderConfig(
+                    id=normalized_id,
+                    name=provider_name or provider_model or "自定义模型",
+                    base_url=provider_base,
+                    api_key=provider_key,
+                    model=provider_model,
+                    timeout_seconds=provider_timeout,
+                    enabled=provider_enabled,
                 )
-                use_review = st.checkbox(
-                    "用于审查生成结果",
-                    value=settings.use_for_review,
+                providers = [
+                    item for item in model_settings.providers if item.id != updated_provider.id
+                ]
+                providers.append(updated_provider)
+                roles = dict(model_settings.roles)
+                for role in ROLE_NAMES:
+                    roles.setdefault(role, updated_provider.id)
+                st.session_state.model_settings = ModelSettings(
+                    providers=providers,
+                    roles=roles,
+                    agent_enabled=model_settings.agent_enabled,
+                    run_python_enabled=model_settings.run_python_enabled,
                 )
-                use_generation = st.checkbox(
-                    "由大模型调用本地工具生成表格",
-                    value=settings.use_for_generation,
-                    help="启用后，大模型会制定完整工作簿方案并调用本地 Excel 工具；失败时不会静默退回无关模板。",
-                )
-                save_clicked = st.form_submit_button(
-                    "保存设置",
-                    type="primary",
-                    width="stretch",
-                )
-            if save_clicked:
-                updated = ApiSettings(
-                    enabled=enabled,
-                    base_url=base_url,
-                    api_key=api_key,
-                    model=model,
-                    provider_name=provider,
-                    timeout_seconds=timeout,
-                    use_for_intent=use_intent,
-                    use_for_review=use_review,
-                    use_for_generation=use_generation,
-                )
-                save_api_settings(updated)
-                st.session_state.api_settings = updated
-                st.session_state.api_message = "设置已保存。"
-                st.session_state.api_message_kind = "success"
+                save_model_settings(st.session_state.model_settings)
+                st.session_state.provider_test_results.pop(updated_provider.id, None)
+                if updated_provider.configured:
+                    st.session_state.api_settings = updated_provider.to_api_settings()
+                    save_api_settings(st.session_state.api_settings)
+                st.success("模型设置已保存。")
                 st.rerun()
 
-            test_col, cancel_col = st.columns(2)
-            if test_col.button("测试连接", width="stretch"):
-                candidate = ApiSettings(
-                    enabled=enabled,
-                    base_url=base_url,
-                    api_key=api_key,
-                    model=model,
-                    provider_name=provider,
-                    timeout_seconds=timeout,
-                    use_for_intent=use_intent,
-                    use_for_review=use_review,
-                    use_for_generation=use_generation,
+        if model_settings.providers:
+            with st.form("model_roles_form"):
+                st.markdown("**角色指派**")
+                choices = [item.id for item in model_settings.providers]
+                role_values: dict[str, str] = {}
+                for role in ROLE_NAMES:
+                    current = model_settings.roles.get(role)
+                    default_index = choices.index(current) if current in choices else 0
+                    role_values[role] = st.selectbox(
+                        ROLE_LABELS.get(role, role),
+                        choices,
+                        index=default_index,
+                        key=f"role_select_{role}",
+                    )
+                agent_enabled = st.checkbox(
+                    "启用自动多步生成",
+                    value=model_settings.agent_enabled,
+                    help="开启后，复杂需求会自动分步分析并选择本地表格工具生成；明确模板填充任务仍走快路径。",
                 )
-                if not candidate.configured:
-                    st.warning("请先填写地址、密钥和模型名称，并启用接口。")
-                else:
-                    with st.spinner("正在测试连接……"):
-                        result = test_api_connection(candidate)
-                    if result.success:
-                        st.success("连接成功。")
-                    else:
-                        st.error(result.error or "连接失败。")
-            if cancel_col.button("取消编辑", width="stretch"):
-                st.session_state.api_edit_mode = False
+                run_python_enabled = st.checkbox(
+                    "允许安全脚本工具",
+                    value=model_settings.run_python_enabled,
+                    help="开启后，后续智能体可在任务临时目录中运行受限 Python 脚本。",
+                )
+                save_roles = st.form_submit_button("保存角色分工", type="primary")
+            if save_roles:
+                st.session_state.model_settings = ModelSettings(
+                    providers=model_settings.providers,
+                    roles=role_values,
+                    agent_enabled=agent_enabled,
+                    run_python_enabled=run_python_enabled,
+                )
+                save_model_settings(st.session_state.model_settings)
+                builder = get_provider("builder", st.session_state.model_settings)
+                if builder:
+                    st.session_state.api_settings = builder.to_api_settings()
+                    save_api_settings(st.session_state.api_settings)
+                st.success("角色分工已保存。")
                 st.rerun()
+
+    with st.container(border=True):
+        st.subheader("我的偏好")
+        preferences = list_preferences()
+        if preferences:
+            st.json(preferences, expanded=False)
+            if st.button("清空已学习偏好", width="stretch"):
+                clear_preferences()
+                st.success("已清空偏好。")
+                st.rerun()
+        else:
+            st.info("还没有学习到偏好。系统只保存低风险偏好，例如常用 sheet 语言、是否偏好图表或模板样式。")
 
     with st.container(border=True):
         st.subheader("清除设置")
@@ -608,7 +954,9 @@ def render_settings_page() -> None:
                 st.warning("请先勾选确认。")
             else:
                 delete_api_settings()
+                delete_model_settings()
                 st.session_state.api_settings = ApiSettings()
+                st.session_state.model_settings = ModelSettings()
                 st.session_state.api_edit_mode = False
                 st.success("接口设置已清除。")
 
@@ -678,7 +1026,14 @@ def render_history_page() -> None:
         "最近文件",
         "重新打开以前生成的表格，继续预览、查看报告或生成修改版。",
     )
-    items = recent_tasks(30)
+    memory_items = list_task_history(30)
+    manifest_items = recent_tasks(30)
+    merged: dict[str, dict[str, Any]] = {}
+    for item in [*manifest_items, *memory_items]:
+        task_id = str(item.get("task_id") or "")
+        if task_id and task_id not in merged:
+            merged[task_id] = item
+    items = list(merged.values())[:30]
     if not items:
         with st.container(border=True):
             st.info("还没有生成记录。")
@@ -787,12 +1142,17 @@ def render_requirement_check(spec: TaskSpec) -> None:
     plan = spec.options.get("content_plan", {})
     columns = [item for item in plan.get("columns", []) if item.get("name")]
     formulas = [item for item in plan.get("formula_rules", []) if item.get("target")]
+    inline_tables = [
+        item for item in plan.get("inline_tables", []) if isinstance(item, dict)
+    ]
     rows = int(plan.get("expected_data_rows") or 0)
     checks = [
         ("用途", TYPE_LABELS.get(spec.task_type, "通用表格")),
         (
             "数据",
-            f"已识别 {rows} 条文字数据"
+            f"已识别 {len(inline_tables)} 个内嵌数据表，主表 {rows} 行"
+            if inline_tables
+            else f"已识别 {rows} 条文字数据"
             if rows
             else f"将使用 {len(spec.input_files)} 个输入文件"
             if spec.input_files
@@ -902,31 +1262,38 @@ def render_confirmation(spec: TaskSpec) -> None:
             key=f"output_name_{nonce}",
         )
         render_plan(spec)
-        with st.expander("可选内容"):
+        with st.expander("图表与其他选项", expanded=spec.include_charts):
             col_a, col_b = st.columns(2)
             spec.include_charts = col_a.checkbox(
                 "生成图表",
                 value=spec.include_charts,
                 key=f"charts_{nonce}",
+                help="勾选后可在下面挑选想要的图表样式。",
             )
             spec.include_summary = col_b.checkbox(
                 "生成独立汇总页",
                 value=spec.include_summary,
                 key=f"summary_{nonce}",
             )
+            if spec.include_charts:
+                default_types = spec.options.get("chart_types") or [
+                    chart_type_from_text(spec.user_goal, default="column")
+                ]
+                chosen = st.multiselect(
+                    "想要的图表样式（可多选，不确定就保留默认）",
+                    options=list(CHART_TYPE_LABELS.keys()),
+                    default=[item for item in default_types if item in CHART_TYPE_LABELS]
+                    or ["column"],
+                    format_func=lambda value: CHART_TYPE_LABELS.get(value, value),
+                    key=f"chart_types_{nonce}",
+                )
+                spec.options["chart_types"] = chosen or ["column"]
+            else:
+                spec.options["chart_types"] = []
         st.session_state.task_spec = spec
         confirm, modify = st.columns(2)
         if confirm.button("确认并生成", type="primary", width="stretch"):
-            status_box = st.status("任务已接收，准备开始……", expanded=True)
-
-            def show_progress(stage: str, message: str) -> None:
-                status_box.write(message)
-                if stage == "complete":
-                    status_box.update(label="表格已生成并检查完成", state="complete")
-                elif stage == "error":
-                    status_box.update(label="生成失败", state="error")
-
-            execute_generation(spec, show_progress)
+            run_generation_with_status(spec)
             st.rerun()
         if modify.button("重新描述需求", width="stretch"):
             st.session_state.task_spec = None
@@ -1028,6 +1395,14 @@ def render_review(
     if not reviews:
         st.info("本次没有启用建议审查。你仍可以在“继续修改”中直接提出修改要求。")
         return
+    labels = {
+        "requirement_review": "需求一致性",
+        "excel_usability_review": "Excel 可用性",
+    }
+    st.markdown("**审查项**")
+    for review in reviews:
+        name = labels.get(str(review.get("reviewer")), str(review.get("reviewer", "审查")))
+        st.write(f"• {name}：{status_label(str(review.get('status', 'warn')))}")
     concerns, suggestions = review_items(subjective)
     if concerns:
         st.markdown("**需要调整**")
@@ -1069,6 +1444,9 @@ def render_revision(spec: TaskSpec) -> None:
         key=f"revision_output_name_{spec.options.get('task_id', 'current')}",
     )
     if st.button("生成修改版", type="primary", width="stretch"):
+        if not request.strip():
+            st.warning("请先在上面填写要修改的内容，再点“生成修改版”。")
+            return
         try:
             revised = build_revision_task_spec(
                 spec,
@@ -1076,21 +1454,14 @@ def render_revision(spec: TaskSpec) -> None:
                 st.session_state.api_settings,
             )
             revised.output_name = output_name
-            status_box = st.status("修改任务已接收，准备开始……", expanded=True)
-
-            def show_revision_progress(stage: str, message: str) -> None:
-                status_box.write(message)
-                if stage == "complete":
-                    status_box.update(label="修改版已生成并检查完成", state="complete")
-                elif stage == "error":
-                    status_box.update(label="修改失败", state="error")
-
-            execute_generation(revised, show_revision_progress)
-            st.session_state.revision_request = ""
-            st.session_state.revision_output_name = ""
+            run_generation_with_status(revised, revision=True)
+            # Note: do NOT assign to st.session_state["revision_request"] here —
+            # that key belongs to the text_area widget above and Streamlit forbids
+            # writing it after the widget is created (it raised silently before,
+            # so the page never refreshed and the new version looked "stuck").
             st.rerun()
         except Exception as exc:
-            st.error(str(exc))
+            st.error(f"生成修改版时出错：{exc}")
     if len(st.session_state.versions) > 1:
         st.markdown("**本次会话中的版本**")
         for index, item in enumerate(st.session_state.versions, start=1):
@@ -1164,6 +1535,10 @@ def render_result() -> None:
             st.success(f"已生成：{spec.output_name}")
         else:
             st.error(generation.get("error") or "生成失败。")
+        if generation.get("elapsed_seconds") is not None:
+            st.caption(
+                f"本次运行用时：{_format_elapsed(generation['elapsed_seconds'])}"
+            )
         for notice in generation.get("notices", []):
             st.info(str(notice))
 
@@ -1187,11 +1562,22 @@ def render_result() -> None:
 def render_workbench() -> None:
     render_header(
         "本地表格助手",
-        "描述你需要的内容，确认后生成表格；生成后可直接预览、检查并继续修改。",
+        "用大白话描述你要的表格，确认后一键生成；生成后可在线预览、检查、调整图表并继续修改。",
     )
+    spec_state = st.session_state.task_spec
+    if st.session_state.task_paths is not None:
+        active_step = 4
+    elif spec_state and not st.session_state.clarification_done:
+        active_step = 2
+    elif spec_state:
+        active_step = 3
+    else:
+        active_step = 1
+    render_steps(active_step)
+
     if st.session_state.task_paths is not None:
         action_col, spacer = st.columns([1.4, 6])
-        if action_col.button("制作另一张表格", width="stretch"):
+        if action_col.button("＋ 制作另一张表格", width="stretch"):
             start_new_task()
             st.rerun()
         render_result()
@@ -1280,6 +1666,7 @@ def render_workbench() -> None:
 
 initialize_state()
 inject_styles()
+show_onboarding_if_first_use()
 render_navigation()
 if st.session_state.active_page == "settings":
     render_settings_page()
