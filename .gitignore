@@ -47,3 +47,6 @@ demo_teaching/*.txt
 
 # AI 根因诊断报告的集中收集目录（运行产物，本地保留供收集，不入库）。
 diagnostics/
+
+# 新手引导"已看过"标记（每台机器本地状态）。
+config/.onboarded

@@ -267,6 +267,7 @@ def render_navigation() -> None:
         width="stretch",
     ):
         st.session_state.active_page = "workbench"
+        st.toast("已切换到「制作表格」", icon="📝")
         st.rerun()
     if settings.button(
         "接口设置",
@@ -274,6 +275,7 @@ def render_navigation() -> None:
         width="stretch",
     ):
         st.session_state.active_page = "settings"
+        st.toast("已切换到「接口设置」", icon="⚙️")
         st.rerun()
     if history.button(
         "最近文件",
@@ -281,6 +283,7 @@ def render_navigation() -> None:
         width="stretch",
     ):
         st.session_state.active_page = "history"
+        st.toast("已切换到「最近文件」", icon="📁")
         st.rerun()
 
 
@@ -297,24 +300,18 @@ def render_header(title: str, subtitle: str) -> None:
 
 
 def render_steps(active: int) -> None:
-    """Show the 1->4 progress chips so a non-technical user always knows where they are."""
+    """用成熟开源组件(streamlit-antd-components)画 1→4 步骤条，非技术用户始终知道在哪一步。"""
+
+    import streamlit_antd_components as sac
 
     names = ["描述需求", "完善要求", "确认生成", "查看结果"]
-    chips = []
-    for index, name in enumerate(names, start=1):
-        cls = "step"
-        if index < active:
-            cls += " done"
-            mark = "✓"
-        elif index == active:
-            cls += " active"
-            mark = str(index)
-        else:
-            mark = str(index)
-        chips.append(
-            f'<div class="{cls}"><span class="dot">{mark}</span>{html.escape(name)}</div>'
-        )
-    st.markdown('<div class="steps">' + "".join(chips) + "</div>", unsafe_allow_html=True)
+    sac.steps(
+        items=[sac.StepsItem(title=name) for name in names],
+        index=max(0, min(active - 1, len(names) - 1)),
+        color="indigo",
+        size="sm",
+        key="workflow_steps",
+    )
 
 
 def _onboard_marker() -> Path:
