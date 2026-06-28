@@ -115,6 +115,7 @@ STATE_DEFAULTS: dict[str, Any] = {
     "versions": [],
     "revision_request": "",
     "revision_output_name": "",
+    "onboarded": False,
 }
 
 
@@ -316,6 +317,38 @@ def render_steps(active: int) -> None:
     st.markdown('<div class="steps">' + "".join(chips) + "</div>", unsafe_allow_html=True)
 
 
+def _onboard_marker() -> Path:
+    return Path("config") / ".onboarded"
+
+
+def show_onboarding_if_first_use() -> None:
+    """首次使用时弹一次新手引导；看完写标记，之后不再弹。"""
+    if st.session_state.get("onboarded") or _onboard_marker().exists():
+        return
+
+    @st.dialog("👋 欢迎使用本地表格助手")
+    def _guide() -> None:
+        st.markdown(
+            "用大白话把你要的表说清楚，AI 帮你做成 Excel。**三步上手：**\n\n"
+            "1. **接口设置**（只需一次）：填好模型接口和密钥（如豆包 / DeepSeek）。\n"
+            "2. **制作表格**：用中文描述你要的表，可上传数据或模板。\n"
+            "3. **生成 → 下载**：点生成，AI 做表并自动校验公式，完成后直接下载。\n\n"
+            "贴心：每次生成后台会自动做一次「问题诊断」，报告集中在项目的 `diagnostics/` "
+            "文件夹，方便回看和分享。"
+        )
+        if st.button("开始使用 →", type="primary", width="stretch"):
+            try:
+                marker = _onboard_marker()
+                marker.parent.mkdir(parents=True, exist_ok=True)
+                marker.write_text("ok", encoding="utf-8")
+            except OSError:
+                pass
+            st.session_state.onboarded = True
+            st.rerun()
+
+    _guide()
+
+
 def reset_generated_result() -> None:
     st.session_state.task_paths = None
     st.session_state.generation_result = None
@@ -453,8 +486,9 @@ def execute_generation(
 
     def progress(stage: str, message: str) -> None:
         if progress_callback:
-            elapsed = max(0, int(time.perf_counter() - started_at))
-            progress_callback(stage, f"{message}（已运行 {_format_elapsed(elapsed)}）")
+            # 计时统一交给 st.spinner(show_time=True) 的实时秒表；这里不再拼"已运行X秒"——
+            # 否则会和实时秒表打架，而且阻塞期间这个数字是卡住的，反而显得坏掉。
+            progress_callback(stage, message)
 
     progress("prepare", "任务已接收，正在准备输入文件和生成目录……")
     spec.output_name = Path(str(spec.output_name or "自定义表格.xlsx")).name
@@ -1641,6 +1675,7 @@ def render_workbench() -> None:
 
 initialize_state()
 inject_styles()
+show_onboarding_if_first_use()
 render_navigation()
 if st.session_state.active_page == "settings":
     render_settings_page()

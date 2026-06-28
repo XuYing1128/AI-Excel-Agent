@@ -2,11 +2,19 @@
 
 import json
 
+import pytest
+
 from excel_agent.api_settings import ApiSettings
 from excel_agent.services import diagnostic_report as dr
 from excel_agent.services.custom_api_service import ApiCallResult
 from excel_agent.task_paths import create_task_paths
 from excel_agent.task_spec import TaskSpec
+
+
+@pytest.fixture(autouse=True)
+def _isolate_collect_dir(tmp_path, monkeypatch):
+    """测试不污染项目根 diagnostics/：把集中目录指到临时目录。"""
+    monkeypatch.setattr(dr, "_COLLECT_DIR", tmp_path / "diagnostics_collect")
 
 
 def _cfg_settings():

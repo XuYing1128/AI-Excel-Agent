@@ -44,3 +44,6 @@ outputs/ai_agent_benchmark/
 
 # 本地验证脚本的运行产物（_regress/_exam 等输出的 .txt），不入库。
 demo_teaching/*.txt
+
+# AI 根因诊断报告的集中收集目录（运行产物，本地保留供收集，不入库）。
+diagnostics/

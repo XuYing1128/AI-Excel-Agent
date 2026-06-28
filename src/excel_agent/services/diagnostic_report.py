@@ -19,6 +19,9 @@ from ..task_paths import TaskPaths, append_run_log_event
 from ..task_spec import TaskSpec
 from .custom_api_service import ApiCallResult, chat_completion, parse_json_object
 
+# 诊断报告除了落在各任务目录，再统一汇一份 .md 到项目根 diagnostics/，方便集中收集/分享。
+_COLLECT_DIR = Path(__file__).resolve().parents[3] / "diagnostics"
+
 ChatFunc = Callable[..., ApiCallResult]
 
 _VALID_LAYERS = {"model", "tool", "code", "network"}
@@ -259,7 +262,14 @@ def _save_markdown(report: dict[str, Any], task_paths: TaskPaths) -> None:
                 f"- **改进方向**：{p.get('suggestion', '')}",
                 "",
             ]
+    text = "\n".join(lines)
     try:
-        (Path(task_paths.task_dir) / "diagnostic_report.md").write_text("\n".join(lines), encoding="utf-8")
+        (Path(task_paths.task_dir) / "diagnostic_report.md").write_text(text, encoding="utf-8")
+    except OSError:
+        pass
+    # 再汇一份到项目根 diagnostics/（用任务号命名，已含时间戳、天然唯一），统一收集方便分享。
+    try:
+        _COLLECT_DIR.mkdir(parents=True, exist_ok=True)
+        (_COLLECT_DIR / f"{task_paths.task_id}.md").write_text(text, encoding="utf-8")
     except OSError:
         pass
