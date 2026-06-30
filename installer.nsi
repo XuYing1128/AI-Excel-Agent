@@ -56,6 +56,11 @@ VIProductVersion "1.0.0.0"
 VIFileVersion "1.0.0.0"
 
 Section "Install"
+  ; 安装前先关闭正在运行的旧版程序，避免 exe 被占用导致"无法写入文件"报错
+  nsExec::ExecToLog 'taskkill /F /IM "${APP_EXE}"'
+  Pop $0  ; 丢弃返回值（没在运行时 taskkill 也会返回错误码，不影响安装）
+  Sleep 500  ; 给系统一点时间释放文件句柄
+
   SetOutPath "$INSTDIR"
   
   ; 先写卸载器（保证即便后续文件复制失败也能卸载）
@@ -90,6 +95,11 @@ Section "Install"
 SectionEnd
 
 Section "Uninstall"
+  ; 卸载前先关闭正在运行的程序，否则 exe 被占用无法删除
+  nsExec::ExecToLog 'taskkill /F /IM "${APP_EXE}"'
+  Pop $0
+  Sleep 500
+
   ; 删除程序文件（保留 outputs/data 用户数据）
   Delete "$INSTDIR\${APP_EXE}"
   Delete "$INSTDIR\Uninstall.exe"

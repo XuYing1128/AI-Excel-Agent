@@ -82,7 +82,7 @@ exe = EXE(
     bootloader_ignore_signals=False,
     strip=False,
     upx=False,
-    console=False,  # GUI 应用，不弹黑框
+    console=True,  # 保留控制台窗口：启动过程可见，崩溃时报错不会被吞，方便排查
     disable_windowed_traceback=False,
     icon=None,  # 如有 icon.ico 可改为 ("icon.ico",)
 )
