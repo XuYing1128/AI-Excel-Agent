@@ -114,14 +114,47 @@ def main() -> None:
     try:
         # Streamlit 1.58+：命令行传 server.port 会触发 developmentMode 冲突
         # (RuntimeError: server.port does not work when global.developmentMode is true)。
-        # 所以用 flag_options 显式指定所有 server 参数——既规避 developmentMode 冲突，
-        # 又确保 Streamlit 的 "Local URL" 显示和自动弹出浏览器用对端口（否则它默认
-        # 显示 localhost:3000，若 3000 被别的程序如 Docker 占用，用户会被误导）。
+        # 用 flag_options 指定所有 server 参数。若用户机器有全局 ~/.streamlit/config.toml
+        # 覆盖了项目配置，这里也能强制纠正端口/地址。
         sys.argv = ["streamlit", "run", app_path]
         # 把 app.py 所在目录加入 import 路径，保证 app.py 里的 import 能找到 src 等包
         sys.path.insert(0, os.path.dirname(app_path))
 
         from streamlit.web import bootstrap
+
+        # 用 set_option 运行时强制钉死关键配置——比 config 文件优先级高，
+        # 防止对方机器的全局 ~/.streamlit/config.toml 覆盖（把端口/地址改错、
+        # 把 Local URL 显示成别的端口导致用户访问不到）。
+        try:
+            from streamlit import config as st_config
+            st_config.set_option("server.port", 8501)
+            st_config.set_option("server.address", "127.0.0.1")
+            st_config.set_option("server.headless", False)
+            _write_startup_log("已用 set_option 钉死 server.port=8501 address=127.0.0.1")
+        except Exception as set_exc:
+            _write_startup_log(f"set_option 失败: {set_exc}")
+
+        # 诊断：dump 实际生效的关键配置 + 是否存在全局config覆盖
+        try:
+            from streamlit import config as st_config
+            home_cf = Path.home() / ".streamlit" / "config.toml"
+            diag_msg = (
+                f"[诊断] 实际配置: port={st_config.get_option('server.port')} "
+                f"address={st_config.get_option('server.address')} "
+                f"headless={st_config.get_option('server.headless')} "
+                f"| 全局config({home_cf})存在={home_cf.exists()}"
+            )
+            print(diag_msg, flush=True)
+            _write_startup_log(diag_msg)
+            if home_cf.exists():
+                content = home_cf.read_text(encoding="utf-8")[:500]
+                _write_startup_log(f"全局config内容: {content}")
+                print(f"[诊断] 全局config内容: {content}", flush=True)
+            # 强制提示用户正确的访问地址
+            print("[重要] 请用浏览器访问: http://127.0.0.1:8501", flush=True)
+            _write_startup_log("提示用户访问 http://127.0.0.1:8501")
+        except Exception as diag_exc:
+            _write_startup_log(f"配置诊断失败: {diag_exc}")
 
         _write_startup_log("正在启动 Streamlit 服务，端口 8501...")
         bootstrap.run(
