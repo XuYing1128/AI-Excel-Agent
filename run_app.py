@@ -14,6 +14,31 @@ import sys
 from pathlib import Path
 
 
+def _force_windows_selector_event_loop() -> None:
+    """Windows 下强制用 SelectorEventLoop 替代默认的 ProactorEventLoop。
+
+    ProactorEventLoop（基于 IOCP/overlapped I/O）在 accept() 后调 getpeername()
+    会抛 WinError 10014（指针地址无效）——某些安全软件(360/火绒/校园管控) hook
+    了网络栈导致。SelectorEventLoop 用 select 实现而非 overlapped，规避此问题。
+    必须在任何库 import asyncio 之前调用，故在模块顶层就执行。
+    """
+    if sys.platform != "win32":
+        return
+    try:
+        import asyncio
+        from asyncio import WindowsSelectorEventLoopPolicy
+
+        asyncio.set_event_loop_policy(WindowsSelectorEventLoopPolicy())
+    except Exception:
+        pass
+
+
+# 模块导入时立即设置——比 streamlit/uvicorn 任何 import asyncio 都早，
+# 才能真正生效（否则 streamlit 已在自己模块里 set 了 ProactorEventLoop）。
+_force_windows_selector_event_loop()
+
+
+
 def _resolve_app_path() -> str:
     """定位 app.py：打包后从 exe 同级（或 _MEIPASS）找，开发模式从本文件同目录找。"""
     # PyInstaller onedir：app.py 通过 --add-data 放在 exe 同级
