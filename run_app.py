@@ -54,8 +54,30 @@ def _write_startup_log(message: str) -> None:
         pass  # 日志写入本身不能再抛异常，否则掩盖原始错误
 
 
+def _force_windows_selector_event_loop() -> None:
+    """Windows 下强制用 SelectorEventLoop 替代默认的 ProactorEventLoop。
+
+    PyInstaller 打包后，Windows 默认的 ProactorEventLoop（基于 IOCP/overlapped I/O）
+    在 accept() 时会抛 WinError 10014（指针地址无效），导致 Streamlit/uvicorn 虽然
+    "监听"了端口却无法接受任何连接——表现为 8501 打不开、服务假死。
+    SelectorEventLoop 用 select 实现而非 overlapped，规避此兼容性 bug。
+    必须在 asyncio 被任何库 import/使用之前调用（所以在 main 第一行）。
+    """
+    if sys.platform != "win32":
+        return
+    try:
+        import asyncio
+        from asyncio import WindowsSelectorEventLoopPolicy
+
+        asyncio.set_event_loop_policy(WindowsSelectorEventLoopPolicy())
+        _write_startup_log("已设置 WindowsSelectorEventLoop（规避 ProactorEventLoop 的 WinError 10014）")
+    except Exception as exc:
+        _write_startup_log(f"设置事件循环策略失败（可能影响连接）: {exc}")
+
+
 def main() -> None:
     _write_startup_log("==== 程序启动 ====")
+    _force_windows_selector_event_loop()
     try:
         app_path = _resolve_app_path()
         _write_startup_log(f"定位到 app.py: {app_path}")
