@@ -67,7 +67,9 @@ def main() -> None:
     try:
         # Streamlit 1.58+：命令行传 server.port 会触发 developmentMode 冲突
         # (RuntimeError: server.port does not work when global.developmentMode is true)。
-        # 所以端口/地址/headless 全部交给 .streamlit/config.toml，这里只跑脚本。
+        # 所以用 flag_options 显式指定所有 server 参数——既规避 developmentMode 冲突，
+        # 又确保 Streamlit 的 "Local URL" 显示和自动弹出浏览器用对端口（否则它默认
+        # 显示 localhost:3000，若 3000 被别的程序如 Docker 占用，用户会被误导）。
         sys.argv = ["streamlit", "run", app_path]
         # 把 app.py 所在目录加入 import 路径，保证 app.py 里的 import 能找到 src 等包
         sys.path.insert(0, os.path.dirname(app_path))
@@ -78,9 +80,12 @@ def main() -> None:
         bootstrap.run(
             app_path,
             False,  # is_hello
-            [],     # 额外命令行参数（不传 port/address，交给 config.toml）
+            [],     # 额外命令行参数（不传 port/address，全部走 flag_options）
             flag_options={
-                "server.headless": False,  # 直接运行/exe 模式都弹浏览器窗口
+                "server.headless": False,     # 直接运行/exe 模式都弹浏览器窗口
+                "server.port": 8501,          # 固定端口，避免被默认 3000 误导
+                "server.address": "127.0.0.1",  # 仅本机回环，不暴露到局域网
+                "global.developmentMode": False,  # 规避 server.port 的 developmentMode 冲突
             },
         )
     except Exception as exc:
